@@ -77,7 +77,7 @@ if [ $stage -le 0 ] && [ $stop_stage -ge 0 ]; then
   #
   #   ln -sfv /path/to/LibriTTS $dl_dir/LibriTTS
   #
-  if [ ! -d $dl_dir/LibriTTS/dev-other ]; then
+  if [ ! -d $dl_dir/LibriTTS/dev-other ] || [ ! -d $dl_dir/LibriTTS/train-other-500 ]; then
     # lhotse download libritts $dl_dir
     lhotse download libritts ${dataset_parts} $dl_dir
   fi
@@ -103,7 +103,8 @@ if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
         --audio-extractor ${audio_extractor} \
         --batch-duration 400 \
         --src-dir "data/manifests" \
-        --output-dir "${audio_feats_dir}"
+        --output-dir "${audio_feats_dir}" \
+        --num-workers 4
   fi
   touch ${audio_feats_dir}/.libritts.tokenize.done
 fi

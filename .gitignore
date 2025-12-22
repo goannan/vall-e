@@ -14,3 +14,5 @@ infer/
 examples/libritts/download/
 examples/libritts/logs/
 traceableSpeech/
+egs/libritts/download/
+egs/libritts/logs/

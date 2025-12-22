@@ -19,6 +19,18 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional, Union
 
 import numpy as np
+# Compatibility shim for NumPy 2+ which removed a few deprecated
+# type aliases (e.g. `np.complex`) used by older versions of
+# libraries such as `librosa`. This restores the minimal aliases
+# locally before importing `librosa` so the project can run on
+# environments with NumPy >= 2.x until a durable environment fix
+# (pinning numpy or upgrading dependent packages) is applied.
+if not hasattr(np, "complex"):
+    np.complex = complex
+if not hasattr(np, "bool"):
+    np.bool = bool
+if not hasattr(np, "int"):
+    np.int = int
 import torch
 from lhotse.features.base import FeatureExtractor
 from lhotse.utils import EPSILON, Seconds, compute_num_frames

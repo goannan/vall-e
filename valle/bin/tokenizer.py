@@ -106,6 +106,13 @@ def get_args():
         "Determines batch size dynamically.",
     )
 
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=16,
+        help="The number of workers for data loading",
+    )
+
     return parser.parse_args()
 
 
@@ -150,7 +157,7 @@ def main():
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     unique_symbols = set()
-    num_jobs = min(32, os.cpu_count())
+    num_jobs = args.num_workers
     logging.info(f"dataset_parts: {dataset_parts} manifests {len(manifests)}")
 
     prefix = args.prefix
@@ -259,4 +266,5 @@ if __name__ == "__main__":
         "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
     )
     logging.basicConfig(format=formatter, level=logging.INFO)
+    logging.getLogger("phonemizer").setLevel(logging.ERROR)
     main()
