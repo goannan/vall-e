@@ -232,9 +232,6 @@ class AudioTokenizer:
     def __init__(
         self,
         device: Any = None,
-        enable_ts: bool = False,
-        ts_checkpoint: Optional[str] = None,
-        ts_config: Optional[str] = None,
     ) -> None:
         # Instantiate a pretrained EnCodec model
         model = EncodecModel.encodec_model_24khz()
@@ -253,25 +250,8 @@ class AudioTokenizer:
         self.channels = model.channels
 
         # TraceableSpeech lazy-loaded components
-        project_root = "/home/wu25/mrnas04home/projects/vall-e"
-        
-        def resolve_path(path, default):
-            if not path:
-                return default
-            if os.path.isabs(path):
-                return path
-            # Try relative to CWD
-            if os.path.isfile(path):
-                return os.path.abspath(path)
-            # Try relative to project root
-            prob_path = os.path.join(project_root, path)
-            if os.path.isfile(prob_path):
-                return prob_path
-            return path # Fallback to original
-
-        self._config_path = resolve_path(ts_config, os.path.join(project_root, "traceableSpeech/config.json"))
-        self._ts_checkpoint = resolve_path(ts_checkpoint, os.path.join(project_root, "traceableSpeech/g_00150000"))
-        self.enable_ts = enable_ts
+        self._config_path = \
+            "/home/wu25/mrnas04home/projects/vall-e/traceableSpeech/config.json"
         self._ts_loaded = False
         self._ts_available = False
         self._h = None
@@ -297,10 +277,9 @@ class AudioTokenizer:
             return self._ts_available
 
         self._ts_loaded = True
-        if not self.enable_ts or not os.path.isfile(self._config_path):
+        if not os.path.isfile(self._config_path):
             return False
 
-        print(f"Loading TraceableSpeech config from {self._config_path}")
         with open(self._config_path) as f:
             json_config = json.load(f)
 
@@ -308,7 +287,6 @@ class AudioTokenizer:
         torch.manual_seed(self._h.seed)
 
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        print(f"Loading TraceableSpeech checkpoint from {self._ts_checkpoint} on {device}")
 
         generator = Generator(self._h).to(device)
         encoder = Encoder(self._h).to(device)
@@ -317,7 +295,7 @@ class AudioTokenizer:
         watermark_decoder = Watermark_Decoder(self._h).to(device)
 
         state_dict_g = load_checkpoint(
-            self._ts_checkpoint,
+            "/home/wu25/mrnas04home/projects/vall-e/traceableSpeech/g_00150000",
             device,
         )
         generator.load_state_dict(state_dict_g["generator"])

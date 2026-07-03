@@ -308,12 +308,7 @@ def main():
     model, text_tokens = load_model(args.checkpoint, device)
     text_collater = get_text_token_collater(text_tokens)
 
-    ts_config = Path(args.ts_checkpoint_file).parent / "config.json"
-    audio_tokenizer = AudioTokenizer(
-        enable_ts=args.ts_enable,
-        ts_checkpoint=args.ts_checkpoint_file,
-        ts_config=str(ts_config),
-    )
+    audio_tokenizer = AudioTokenizer()
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
@@ -478,7 +473,7 @@ def main():
 
             # watermark sign
             watermark_sign = None
-            if args.ts_enable and getattr(audio_tokenizer, "_ts_available", False):
+            if getattr(audio_tokenizer, "_ts_available", False):
                 watermark_sign = Random_watermark(encoded_frames.size(0)).to(
                     audio_tokenizer.device
                 )

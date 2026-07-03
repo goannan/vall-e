@@ -4,12 +4,10 @@
 
 exp_dir=exp/valle
 # step3 inference
-python3 bin/infer.py --output-dir infer/demos \
-    --checkpoint=${exp_dir}/best-valid-loss.pt \
+python3 bin/infer.py --output-dir infer/demos2 \
+    --checkpoint=${exp_dir}/epoch-40.pt \
     --text-prompts "KNOT one point one five miles per hour." \
-    --audio-prompts ./prompts/8463_294825_000043_000000.wav \
-    --text "To get up and running quickly just follow the steps below." \
+    --audio-prompts ./prompts/8455_210777_000067_000000.wav \
+    --text-file data/texts100.txt \
     --ts-enable true \
-    --ts-checkpoint-file /home/wu25/mrnas04home/projects/TraceableSpeech/save_model320/g_00150000 \
-    --ts-sample-num 5 \
-    --ts-bit-num 4 \
+    --ts-checkpoint-file ./traceableSpeech/g_00150000 \

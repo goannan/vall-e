@@ -77,7 +77,10 @@ class SpeechSynthesisDataset(torch.utils.data.Dataset):
         for transform in self.cut_transforms:
             cuts = transform(cuts)
 
-        audio, audio_lens = collate_audio(cuts)
+        if False:  # not used
+            audio, audio_lens = collate_audio(cuts)
+        else:  # for sharing tokenized features in different machines
+            audio, audio_lens = None, None
 
         audio_features, audio_features_lens = self.feature_input_strategy(cuts)
 
