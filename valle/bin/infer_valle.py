@@ -108,12 +108,11 @@ def get_args():
         help="Do continual task.",
     )
 
-    # TraceableSpeech arguments
     parser.add_argument(
         "--ts-enable",
         type=str2bool,
         default=False,
-        help="Whether to enable TraceableSpeech.",
+        help="Legacy switch for --watermark-backend traceablespeech.",
     )
 
     parser.add_argument(
@@ -121,6 +120,43 @@ def get_args():
         type=str,
         default="traceableSpeech/g_00150000",
         help="The checkpoint file of TraceableSpeech model.",
+    )
+    parser.add_argument(
+        "--watermark-backend",
+        type=str,
+        default="encodec",
+        choices=["encodec", "traceablespeech", "voicemark"],
+        help="Codec/watermark backend used by AudioTokenizer.",
+    )
+    parser.add_argument(
+        "--voicemark-root",
+        type=str,
+        default="/home/wu25/mrnas04home/projects/VoiceMark",
+        help="Path to the VoiceMark project root.",
+    )
+    parser.add_argument(
+        "--voicemark-config",
+        type=str,
+        default="STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json",
+        help="VoiceMark SpeechTokenizer config, absolute or relative to --voicemark-root.",
+    )
+    parser.add_argument(
+        "--voicemark-st-checkpoint",
+        type=str,
+        default="STmodels/pretrained_model/SpeechTokenizer.pt",
+        help="VoiceMark SpeechTokenizer checkpoint, absolute or relative to --voicemark-root.",
+    )
+    parser.add_argument(
+        "--voicemark-checkpoint",
+        type=str,
+        default="train/Log/spt_base/20260601-123358/WatermarkTrainer_final_00150000.pt",
+        help="VoiceMark watermark checkpoint, absolute or relative to --voicemark-root.",
+    )
+    parser.add_argument(
+        "--voicemark-embed-vq1",
+        type=str2bool,
+        default=True,
+        help="Whether VoiceMark embeds/detects watermark in VQ1-8 instead of VQ2-8.",
     )
 
     return parser.parse_args()
@@ -148,13 +184,24 @@ def main():
     # 1. Load Tokenizers
     text_tokenizer = TextTokenizer(backend=args.text_extractor)
     
+    watermark_backend = args.watermark_backend
+    if args.ts_enable and watermark_backend == "encodec":
+        watermark_backend = "traceablespeech"
+
     ts_config = Path(args.ts_checkpoint_file).parent / "config.json"
     audio_tokenizer = AudioTokenizer(
         device=device,
         enable_ts=args.ts_enable,
         ts_checkpoint=args.ts_checkpoint_file,
         ts_config=str(ts_config),
+        watermark_backend=watermark_backend,
+        voicemark_root=args.voicemark_root,
+        voicemark_config=args.voicemark_config,
+        voicemark_st_checkpoint=args.voicemark_st_checkpoint,
+        voicemark_checkpoint=args.voicemark_checkpoint,
+        voicemark_embed_vq1=args.voicemark_embed_vq1,
     )
+    audio_sample_rate = audio_tokenizer.sample_rate
 
     # 2. Load Model
     model, text_tokens = load_model(args.checkpoint, device)
@@ -224,7 +271,7 @@ def main():
 
         # Save
         out_path = args.output_dir / f"{n}.wav"
-        torchaudio.save(str(out_path), samples[0].cpu(), 24000)
+        torchaudio.save(str(out_path), samples[0].cpu(), audio_sample_rate)
         logging.info(f"Saved to {out_path}")
 
 

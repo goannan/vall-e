@@ -16,6 +16,7 @@
 from email import parser
 from pyexpat.errors import codes
 import re
+import sys
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Pattern, Union
 
@@ -36,6 +37,7 @@ from phonemizer.separator import Separator
 import os
 import argparse
 import json
+from pathlib import Path
 # TraceableSpeech project lives at vall-e/traceableSpeech; imports are lowercase on disk.
 from traceableSpeech.env import AttrDict
 from traceableSpeech.models import Generator, Encoder, Quantizer
@@ -226,8 +228,110 @@ def load_checkpoint(filepath, device):
     print("Complete.")
     return checkpoint_dict
 
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_VOICEMARK_ROOT = PROJECT_ROOT.parent / "VoiceMark"
+
+
+def str_to_bool(value: Union[str, bool, None], default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    value = value.strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Cannot parse boolean value: {value}")
+
+
+def resolve_path(path: Optional[str], default: Union[str, Path], root: Union[str, Path] = PROJECT_ROOT) -> str:
+    if not path:
+        return str(default)
+    path_obj = Path(path)
+    if path_obj.is_absolute():
+        return str(path_obj)
+    if path_obj.exists():
+        return str(path_obj.resolve())
+    root_path = Path(root) / path_obj
+    if root_path.exists():
+        return str(root_path.resolve())
+    return str(path_obj)
+
+
+def _import_voicemark(voicemark_root: str):
+    import torch.nn.utils.parametrizations as parametrizations
+    from torch.nn.utils import spectral_norm as legacy_spectral_norm
+    from torch.nn.utils import weight_norm as legacy_weight_norm
+
+    if not hasattr(parametrizations, "weight_norm"):
+        parametrizations.weight_norm = legacy_weight_norm
+    if not hasattr(parametrizations, "spectral_norm"):
+        parametrizations.spectral_norm = legacy_spectral_norm
+
+    root = str(Path(voicemark_root).resolve())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from STmodels.model import SpeechTokenizer as VoiceMarkSpeechTokenizer
+    from models import WMDetector, WMEmbedder
+
+    return VoiceMarkSpeechTokenizer, WMEmbedder, WMDetector
+
+
+def _load_voicemark_watermark_state(
+    checkpoint_path: str,
+    msg_processor: torch.nn.Module,
+    detector: torch.nn.Module,
+) -> None:
+    if not checkpoint_path or not os.path.isfile(checkpoint_path):
+        print(f"VoiceMark watermark checkpoint not found: {checkpoint_path}")
+        return
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if "msg_processor" in checkpoint and "detector" in checkpoint:
+        msg_processor.load_state_dict(checkpoint["msg_processor"], strict=True)
+        detector.load_state_dict(checkpoint["detector"], strict=True)
+    elif "embedder" in checkpoint and "detector" in checkpoint:
+        msg_processor.load_state_dict(checkpoint["embedder"], strict=True)
+        detector.load_state_dict(checkpoint["detector"], strict=True)
+    elif "model_state_dict" in checkpoint:
+        state = checkpoint["model_state_dict"]
+        msg_state = {
+            k.removeprefix("msg_processor."): v
+            for k, v in state.items()
+            if k.startswith("msg_processor.")
+        }
+        det_state = {
+            k.removeprefix("detector."): v
+            for k, v in state.items()
+            if k.startswith("detector.")
+        }
+        if msg_state:
+            msg_processor.load_state_dict(msg_state, strict=True)
+        if det_state:
+            detector.load_state_dict(det_state, strict=True)
+    else:
+        msg_state = {
+            k.removeprefix("msg_processor."): v
+            for k, v in checkpoint.items()
+            if k.startswith("msg_processor.")
+        }
+        det_state = {
+            k.removeprefix("detector."): v
+            for k, v in checkpoint.items()
+            if k.startswith("detector.")
+        }
+        if not msg_state and not det_state:
+            raise ValueError(f"Unsupported VoiceMark checkpoint format: {checkpoint_path}")
+        if msg_state:
+            msg_processor.load_state_dict(msg_state, strict=True)
+        if det_state:
+            detector.load_state_dict(det_state, strict=True)
+
+
 class AudioTokenizer:
-    """EnCodec audio."""
+    """Audio codec wrapper for EnCodec, TraceableSpeech, and VoiceMark."""
 
     def __init__(
         self,
@@ -235,43 +339,51 @@ class AudioTokenizer:
         enable_ts: bool = False,
         ts_checkpoint: Optional[str] = None,
         ts_config: Optional[str] = None,
+        watermark_backend: str = "encodec",
+        voicemark_root: Optional[str] = None,
+        voicemark_config: Optional[str] = None,
+        voicemark_st_checkpoint: Optional[str] = None,
+        voicemark_checkpoint: Optional[str] = None,
+        voicemark_embed_vq1: Union[str, bool, None] = None,
     ) -> None:
-        # Instantiate a pretrained EnCodec model
-        model = EncodecModel.encodec_model_24khz()
-        model.set_target_bandwidth(6.0)
-        remove_encodec_weight_norm(model)
-
         if not device:
-            device = torch.device("cpu")
-            if torch.cuda.is_available():
-                device = torch.device("cuda:0")
-
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self._device = device
 
-        self.codec = model.to(device)
-        self.sample_rate = model.sample_rate
-        self.channels = model.channels
+        backend = (watermark_backend or "encodec").lower()
+        if enable_ts and backend == "encodec":
+            backend = "traceablespeech"
+        if backend in {"ts", "traceable_speech"}:
+            backend = "traceablespeech"
+        if backend in {"vm", "voice_mark"}:
+            backend = "voicemark"
+        if backend not in {"encodec", "traceablespeech", "voicemark"}:
+            raise ValueError(f"Unsupported watermark backend: {watermark_backend}")
+        self.watermark_backend = backend
 
-        # TraceableSpeech lazy-loaded components
-        project_root = "/home/wu25/mrnas04home/projects/vall-e"
-        
-        def resolve_path(path, default):
-            if not path:
-                return default
-            if os.path.isabs(path):
-                return path
-            # Try relative to CWD
-            if os.path.isfile(path):
-                return os.path.abspath(path)
-            # Try relative to project root
-            prob_path = os.path.join(project_root, path)
-            if os.path.isfile(prob_path):
-                return prob_path
-            return path # Fallback to original
+        self.codec = None
+        self.sample_rate = 24000
+        self.channels = 1
+        self.downsample_rate = 320
+        self.num_quantizers = 8
 
-        self._config_path = resolve_path(ts_config, os.path.join(project_root, "traceableSpeech/config.json"))
-        self._ts_checkpoint = resolve_path(ts_checkpoint, os.path.join(project_root, "traceableSpeech/g_00150000"))
-        self.enable_ts = enable_ts
+        if self.watermark_backend != "voicemark":
+            model = EncodecModel.encodec_model_24khz()
+            model.set_target_bandwidth(6.0)
+            remove_encodec_weight_norm(model)
+            self.codec = model.to(device)
+            self.sample_rate = model.sample_rate
+            self.channels = model.channels
+
+        self._config_path = resolve_path(
+            ts_config,
+            PROJECT_ROOT / "traceableSpeech" / "config.json",
+        )
+        self._ts_checkpoint = resolve_path(
+            ts_checkpoint,
+            PROJECT_ROOT / "traceableSpeech" / "g_00150000",
+        )
+        self.enable_ts = self.watermark_backend == "traceablespeech"
         self._ts_loaded = False
         self._ts_available = False
         self._h = None
@@ -281,15 +393,54 @@ class AudioTokenizer:
         self._watermark_encoder = None
         self._watermark_decoder = None
 
+        self._vm_root = resolve_path(voicemark_root, DEFAULT_VOICEMARK_ROOT)
+        self._vm_config_path = resolve_path(
+            voicemark_config,
+            Path(self._vm_root) / "STmodels" / "pretrained_model" / "speechtokenizer_hubert_avg_config.json",
+            root=self._vm_root,
+        )
+        self._vm_st_checkpoint = resolve_path(
+            voicemark_st_checkpoint,
+            Path(self._vm_root) / "STmodels" / "pretrained_model" / "SpeechTokenizer.pt",
+            root=self._vm_root,
+        )
+        self._vm_checkpoint = resolve_path(
+            voicemark_checkpoint,
+            Path(self._vm_root) / "train" / "Log" / "spt_base" / "20260601-123358" / "WatermarkTrainer_final_00150000.pt",
+            root=self._vm_root,
+        )
+        self._vm_embed_vq1 = str_to_bool(voicemark_embed_vq1, default=True)
+        self._vm_loaded = False
+        self._vm_available = False
+        self._vm_st_model = None
+        self._vm_msg_processor = None
+        self._vm_detector = None
+        self.nbits = 16
+        self.nchunk_size = 4
+
+        if self.watermark_backend == "voicemark" and os.path.isfile(self._vm_config_path):
+            with open(self._vm_config_path) as f:
+                vm_cfg = json.load(f)
+            self.sample_rate = int(vm_cfg.get("sample_rate", 16000))
+            self.channels = 1
+            self.downsample_rate = int(np.prod(vm_cfg.get("strides", [8, 5, 4, 2])))
+            self.num_quantizers = int(vm_cfg.get("n_q", 8))
+
     @property
     def device(self):
         return self._device
 
-    # def encode(self, wav: torch.Tensor) -> torch.Tensor:
-    #     return self.codec.encode(wav.to(self.device))
+    @property
+    def frame_shift(self) -> Seconds:
+        return self.downsample_rate / self.sample_rate
 
-    # def decode(self, frames: torch.Tensor) -> torch.Tensor:
-    #     return self.codec.decode(frames)
+    @property
+    def has_watermark_decoder(self) -> bool:
+        if self.watermark_backend == "voicemark":
+            return self._load_voicemark()
+        if self.watermark_backend == "traceablespeech":
+            return self._load_traceable_speech()
+        return False
 
     def _load_traceable_speech(self) -> bool:
         """Lazily load TraceableSpeech models if configuration exists."""
@@ -307,7 +458,7 @@ class AudioTokenizer:
         self._h = AttrDict(json_config)
         torch.manual_seed(self._h.seed)
 
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        device = self.device
         print(f"Loading TraceableSpeech checkpoint from {self._ts_checkpoint} on {device}")
 
         generator = Generator(self._h).to(device)
@@ -316,10 +467,7 @@ class AudioTokenizer:
         watermark_encoder = Watermark_Encoder(self._h).to(device)
         watermark_decoder = Watermark_Decoder(self._h).to(device)
 
-        state_dict_g = load_checkpoint(
-            self._ts_checkpoint,
-            device,
-        )
+        state_dict_g = load_checkpoint(self._ts_checkpoint, device)
         generator.load_state_dict(state_dict_g["generator"])
         encoder.load_state_dict(state_dict_g["encoder"])
         quantizer_audio.load_state_dict(state_dict_g["quantizer_Audio"])
@@ -334,7 +482,6 @@ class AudioTokenizer:
         watermark_decoder.eval()
 
         self._ts_available = True
-        self._device = device
         self._generator = generator
         self._encoder = encoder
         self._quantizer_audio = quantizer_audio
@@ -342,9 +489,91 @@ class AudioTokenizer:
         self._watermark_decoder = watermark_decoder
         return True
 
+    def _load_voicemark(self) -> bool:
+        if self._vm_loaded:
+            return self._vm_available
+
+        self._vm_loaded = True
+        if self.watermark_backend != "voicemark":
+            return False
+        if not os.path.isfile(self._vm_config_path):
+            raise FileNotFoundError(f"VoiceMark config not found: {self._vm_config_path}")
+        if not os.path.isfile(self._vm_st_checkpoint):
+            raise FileNotFoundError(f"VoiceMark SpeechTokenizer checkpoint not found: {self._vm_st_checkpoint}")
+
+        VoiceMarkSpeechTokenizer, WMEmbedder, WMDetector = _import_voicemark(self._vm_root)
+        print(f"Loading VoiceMark SpeechTokenizer from {self._vm_st_checkpoint}")
+        st_model = VoiceMarkSpeechTokenizer.load_from_checkpoint(
+            self._vm_config_path,
+            self._vm_st_checkpoint,
+        ).to(self.device)
+        msg_processor = WMEmbedder(nbits=self.nbits, input_dim=1024, nchunk_size=self.nchunk_size).to(self.device)
+        detector = WMDetector(1024, self.nbits, nchunk_size=self.nchunk_size).to(self.device)
+        _load_voicemark_watermark_state(self._vm_checkpoint, msg_processor, detector)
+
+        st_model.eval()
+        msg_processor.eval()
+        detector.eval()
+        for module in (st_model, msg_processor, detector):
+            for param in module.parameters():
+                param.requires_grad = False
+
+        self._vm_st_model = st_model
+        self._vm_msg_processor = msg_processor
+        self._vm_detector = detector
+        self._vm_available = True
+        return True
+
+    def _extract_codes(self, frames: torch.Tensor) -> torch.Tensor:
+        if isinstance(frames, (list, tuple)):
+            codes = frames[0][0] if isinstance(frames[0], (list, tuple)) else frames[0]
+        else:
+            codes = frames
+        return codes.to(self.device)
+
+    def _voicemark_codes_to_qbt(self, codes: torch.Tensor) -> torch.Tensor:
+        codes = codes.long()
+        if codes.dim() != 3:
+            raise ValueError(f"Expected VoiceMark codes with 3 dims, got {tuple(codes.shape)}")
+        if codes.shape[1] == self.num_quantizers:
+            return codes.permute(1, 0, 2).contiguous()
+        if codes.shape[0] == self.num_quantizers:
+            return codes.contiguous()
+        raise ValueError(f"Cannot infer VoiceMark code layout from shape {tuple(codes.shape)}")
+
+    def _decode_voicemark(self, codes: torch.Tensor, message: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if not self._load_voicemark():
+            raise RuntimeError("VoiceMark backend is not available.")
+
+        codes_qbt = self._voicemark_codes_to_qbt(codes)
+        if message is None:
+            return self._vm_st_model.decode(codes_qbt)
+
+        message = message.to(self.device).long()
+        quantized_layers = [
+            self._vm_st_model.quantizer.decode(codes_qbt[i : i + 1], st=i)
+            for i in range(codes_qbt.shape[0])
+        ]
+        if self._vm_embed_vq1:
+            watermarked_latent = sum(
+                self._vm_msg_processor(layer, message) for layer in quantized_layers
+            )
+        else:
+            watermarked_latent = quantized_layers[0] + sum(
+                self._vm_msg_processor(layer, message) for layer in quantized_layers[1:]
+            )
+        return self._vm_st_model.decoder(watermarked_latent)
+
     def encode(self, wav: torch.Tensor) -> torch.Tensor:
         # input: wav: [B, C = 1, T]
-        # output: encoded_frames: List[torch.Tensor] with each tensor shape is [B, n_q = 8, T = T/320]
+        # output: List[(codes, scale)] with codes [B, n_q = 8, T/downsample_rate]
+        if self.watermark_backend == "voicemark":
+            if not self._load_voicemark():
+                raise RuntimeError("VoiceMark backend is not available.")
+            with torch.no_grad():
+                codes = self._vm_st_model.encode(wav.to(self.device))
+                return [(codes.permute(1, 0, 2).contiguous(), None)]
+
         if not self._load_traceable_speech():
             return self.codec.encode(wav.to(self.device))
 
@@ -352,63 +581,55 @@ class AudioTokenizer:
             wav = wav.to(self.device)
             en_y = self._encoder(wav)  # [B, 1024, T/320]
             q, _, c = self._quantizer_audio(en_y)
-            q = torch.stack([code.reshape(q.size(0), -1) for code in c], -1) # q : [1, T/320, 8]
-            q = q.transpose(1, 2)  # [B, n_q = 8, T/320] to match EnCodec output
+            q = torch.stack([code.reshape(q.size(0), -1) for code in c], -1)
+            q = q.transpose(1, 2)  # [B, n_q = 8, T/320]
             encoded_frames = [(q, None)]
         return encoded_frames
 
     def decode(
         self, frames: torch.Tensor, watermark_sign: torch.Tensor = None
     ) -> torch.Tensor:
-        # frames: List[torch.Tensor] with each tensor shape is [B = 1, n_q = 8, T = T/320]
-        # output: decoded_wav: [B = 1, C = 1, T = T]
+        # frames: List[(codes, scale)] with codes [B, n_q, T]
+        if self.watermark_backend == "voicemark":
+            return self._decode_voicemark(self._extract_codes(frames), watermark_sign)
+
         if not self._load_traceable_speech():
             return self.codec.decode(frames)
 
-        # frames -> codes
-        if isinstance(frames, (list, tuple)):
-            codes = frames[0][0] if isinstance(frames[0], (list, tuple)) else frames[0]
-        else:
-            codes = frames
-        codes = codes.to(self.device)  # [B, n_q, T]
+        codes = self._extract_codes(frames)
         quantized = self._quantizer_audio.embed(
             codes.transpose(1, 2),
             self._h.Audio.get("infer_need_layer", self._h.Audio["residul_layer"]),
         )
         sign_trait = torch.zeros((codes.size(0), 256), device=self.device)
         if watermark_sign is not None:
-            sign_trait = self._watermark_encoder(
-                watermark_sign.to(self.device).long()
-            )
+            sign_trait = self._watermark_encoder(watermark_sign.to(self.device).long())
         decoded_wav = self._generator(quantized, sign_trait)
         return decoded_wav
 
     def decode_pair(
         self, frames: torch.Tensor, watermark_sign: torch.Tensor = None
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Decode both reference (zero watermark) and optional watermarked audio.
+        """Decode both reference and optional watermarked audio."""
+        if self.watermark_backend == "voicemark":
+            codes = self._extract_codes(frames)
+            decoded_ref = self._decode_voicemark(codes, None)
+            decoded_wm = None
+            if watermark_sign is not None:
+                decoded_wm = self._decode_voicemark(codes, watermark_sign)
+            return decoded_ref, decoded_wm
 
-        Returns (decoded_ref, decoded_wm_or_None).
-        """
         if not self._load_traceable_speech():
             ref = self.codec.decode(frames)
-            wm = None
-            if watermark_sign is not None:
-                # For EnCodec fallback, reuse same decode as reference.
-                wm = self.codec.decode(frames)
+            wm = self.codec.decode(frames) if watermark_sign is not None else None
             return ref, wm
 
-        if isinstance(frames, (list, tuple)):
-            codes = frames[0][0] if isinstance(frames[0], (list, tuple)) else frames[0]
-        else:
-            codes = frames
-        codes = codes.to(self.device)
+        codes = self._extract_codes(frames)
         quantized = self._quantizer_audio.embed(
             codes.transpose(1, 2),
             self._h.Audio.get("infer_need_layer", self._h.Audio["residul_layer"]),
         )
 
-        # Reference decode with zero watermark
         ref_trait = torch.zeros((codes.size(0), 256), device=self.device)
         decoded_ref = self._generator(quantized, ref_trait)
 
@@ -418,6 +639,20 @@ class AudioTokenizer:
             decoded_wm = self._generator(quantized, wm_trait)
 
         return decoded_ref, decoded_wm
+
+    def random_watermark(self, batch_size: int) -> Optional[torch.Tensor]:
+        if self.watermark_backend == "voicemark" and self._load_voicemark():
+            return torch.randint(0, 2, (batch_size, self.nbits), device=self.device)
+        if self.watermark_backend == "traceablespeech" and self._load_traceable_speech():
+            return Random_watermark(batch_size).to(self.device)
+        return None
+
+    def detect_watermark(self, wav: torch.Tensor):
+        if self.watermark_backend != "voicemark" or not self._load_voicemark():
+            return None
+        wav = wav.to(self.device)
+        features = self._vm_st_model.forward_feature(wav, embed_vq1=self._vm_embed_vq1)
+        return self._vm_detector.detect_watermark(features)
 
 
 def tokenize_audio(tokenizer: AudioTokenizer, audio_path: str):
@@ -436,6 +671,12 @@ def tokenize_audio(tokenizer: AudioTokenizer, audio_path: str):
 class AudioTokenConfig:
     frame_shift: Seconds = 320.0 / 24000
     num_quantizers: int = 8
+    backend: str = "encodec"
+    voicemark_root: Optional[str] = None
+    voicemark_config: Optional[str] = None
+    voicemark_st_checkpoint: Optional[str] = None
+    voicemark_checkpoint: Optional[str] = None
+    voicemark_embed_vq1: Union[str, bool, None] = True
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -451,7 +692,17 @@ class AudioTokenExtractor(FeatureExtractor):
 
     def __init__(self, config: Optional[Any] = None):
         super(AudioTokenExtractor, self).__init__(config)
-        self.tokenizer = AudioTokenizer()
+        self.tokenizer = AudioTokenizer(
+            watermark_backend=self.config.backend,
+            voicemark_root=self.config.voicemark_root,
+            voicemark_config=self.config.voicemark_config,
+            voicemark_st_checkpoint=self.config.voicemark_st_checkpoint,
+            voicemark_checkpoint=self.config.voicemark_checkpoint,
+            voicemark_embed_vq1=self.config.voicemark_embed_vq1,
+        )
+        self.config.frame_shift = self.tokenizer.frame_shift
+        self.config.num_quantizers = self.tokenizer.num_quantizers
+        self.name = self.config.backend
 
     def extract(
         self, samples: Union[np.ndarray, torch.Tensor], sampling_rate: int
@@ -474,11 +725,11 @@ class AudioTokenExtractor(FeatureExtractor):
         encoded_frames = self.tokenizer.encode(samples.detach().to(device))
         codes = encoded_frames[0][0]  # [B, n_q, T]
         if True:
-            duration = round(samples.shape[-1] / sampling_rate, ndigits=12)
+            duration = round(samples.shape[-1] / self.tokenizer.sample_rate, ndigits=12)
             expected_num_frames = compute_num_frames(
                 duration=duration,
                 frame_shift=self.frame_shift,
-                sampling_rate=sampling_rate,
+                sampling_rate=self.tokenizer.sample_rate,
             )
             assert abs(codes.shape[-1] - expected_num_frames) <= 1
             codes = codes[..., :expected_num_frames]
@@ -501,27 +752,55 @@ class AudioTokenExtractor(FeatureExtractor):
         )
         return padded_tensor, lengths
 
+    def _prepare_batch_audio(
+        self,
+        samples: List[Union[np.ndarray, torch.Tensor]],
+        sampling_rate: int,
+    ) -> List[torch.Tensor]:
+        prepared = []
+        for wav in samples:
+            if not isinstance(wav, torch.Tensor):
+                wav = torch.from_numpy(wav)
+            wav = wav.detach().cpu().float()
+
+            if wav.ndim == 1:
+                wav = wav.unsqueeze(0)
+            elif wav.ndim == 2:
+                wav = wav.squeeze()
+                if wav.ndim == 1:
+                    wav = wav.unsqueeze(0)
+                elif wav.shape[0] not in (1, 2) and wav.shape[-1] in (1, 2):
+                    wav = wav.transpose(0, 1)
+            else:
+                raise ValueError()
+
+            if wav.shape[0] not in (1, 2):
+                raise ValueError()
+
+            if (
+                sampling_rate != self.tokenizer.sample_rate
+                or wav.shape[0] != self.tokenizer.channels
+            ):
+                wav = convert_audio(
+                    wav,
+                    sampling_rate,
+                    self.tokenizer.sample_rate,
+                    self.tokenizer.channels,
+                )
+
+            prepared.append(wav.squeeze(0))
+        return prepared
+
     def extract_batch(self, samples, sampling_rate, lengths) -> np.ndarray:
-        samples = [wav.squeeze() for wav in samples]
         device = self.tokenizer.device
-        samples, lengths = self.pad_tensor_list(samples, device)
+        samples = self._prepare_batch_audio(samples, sampling_rate)
+        samples, lengths = self.pad_tensor_list(samples, "cpu")
         samples = samples.unsqueeze(1)
 
         if not isinstance(samples, torch.Tensor):
             samples = torch.from_numpy(samples)
         if len(samples.shape) != 3:
             raise ValueError()
-        if sampling_rate != self.tokenizer.sample_rate:
-            samples = [
-                convert_audio(
-                    wav,
-                    sampling_rate,
-                    self.tokenizer.sample_rate,
-                    self.tokenizer.channels,
-                )
-                for wav in samples
-            ]
-            samples = torch.stack(samples, 0) # convert samples from list to tensor
         # Extract discrete codes from EnCodec
         with torch.no_grad():
             encoded_frames = self.tokenizer.encode(samples.detach().to(device))
@@ -529,11 +808,11 @@ class AudioTokenExtractor(FeatureExtractor):
         batch_codes = []
         for b, length in enumerate(lengths):
             codes = encoded_frames[b]
-            duration = round(length / sampling_rate, ndigits=12)
+            duration = round(length / self.tokenizer.sample_rate, ndigits=12)
             expected_num_frames = compute_num_frames(
                 duration=duration,
                 frame_shift=self.frame_shift,
-                sampling_rate=sampling_rate,
+                sampling_rate=self.tokenizer.sample_rate,
             )
             batch_codes.append(codes[..., :expected_num_frames])
         return [codes.cpu().permute(1, 0).numpy() for codes in batch_codes]

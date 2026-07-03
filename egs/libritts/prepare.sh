@@ -52,8 +52,13 @@ dl_dir=$PWD/download
 # dataset_parts="-p dev-clean -p test-clean"  # debug
 dataset_parts="--dataset-parts all"  # all
 
-audio_extractor="Encodec"  # or Fbank
-audio_feats_dir=data/tokenized
+audio_extractor="${AUDIO_EXTRACTOR:-Encodec}"  # Encodec, VoiceMark, or Fbank
+audio_feats_dir="${AUDIO_FEATS_DIR:-data/tokenized}"
+voicemark_root="${VOICEMARK_ROOT:-/home/wu25/mrnas04home/projects/VoiceMark}"
+voicemark_config="${VOICEMARK_CONFIG:-STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json}"
+voicemark_st_checkpoint="${VOICEMARK_ST_CHECKPOINT:-STmodels/pretrained_model/SpeechTokenizer.pt}"
+voicemark_checkpoint="${VOICEMARK_CHECKPOINT:-train/Log/spt_base/20260601-123358/WatermarkTrainer_final_00150000.pt}"
+voicemark_embed_vq1="${VOICEMARK_EMBED_VQ1:-true}"
 
 . shared/parse_options.sh || exit 1
 
@@ -101,6 +106,11 @@ if [ $stage -le 2 ] && [ $stop_stage -ge 2 ]; then
   if [ ! -e ${audio_feats_dir}/.libritts.tokenize.done ]; then
     python3 bin/tokenizer.py --dataset-parts "${dataset_parts}" \
         --audio-extractor ${audio_extractor} \
+        --voicemark-root "${voicemark_root}" \
+        --voicemark-config "${voicemark_config}" \
+        --voicemark-st-checkpoint "${voicemark_st_checkpoint}" \
+        --voicemark-checkpoint "${voicemark_checkpoint}" \
+        --voicemark-embed-vq1 "${voicemark_embed_vq1}" \
         --batch-duration 400 \
         --src-dir "data/manifests" \
         --output-dir "${audio_feats_dir}" \

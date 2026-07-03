@@ -2,10 +2,13 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
-exp_dir=exp/valle
+exp_dir=${EXP_DIR:-exp/valle}
+manifest_dir=${MANIFEST_DIR:-data/tokenized}
+sampling_rate=${SAMPLING_RATE:-24000}
 ## Train NAR model
 cp ${exp_dir}/best-valid-loss.pt ${exp_dir}/epoch-2.pt  # --start-epoch 3=2+1
 python3 bin/trainer.py --max-duration 40 --filter-min-duration 0.5 --filter-max-duration 14 --train-stage 2 \
+      --manifest-dir ${manifest_dir} --sampling-rate ${sampling_rate} \
       --num-buckets 6 --dtype "float32" --save-every-n 10000 --valid-interval 20000 \
       --model-name valle --share-embedding true --norm-first true --add-prenet false \
       --decoder-dim 1024 --nhead 16 --num-decoder-layers 12 --prefix-mode 1 \

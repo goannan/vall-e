@@ -302,6 +302,7 @@ class AudioEffects:
     def encodec(
         tensor: torch.Tensor,
         bandwidth: float = 6.0,
+        sample_rate: int = 16000,
         mask: tp.Optional[torch.Tensor] = None,
     ) -> tp.Union[tp.Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """
@@ -317,9 +318,23 @@ class AudioEffects:
         if next(ENCODEC_MODEL.parameters()).device != tensor.device:
             ENCODEC_MODEL.to(tensor.device)
 
+        encodec_sr = 24000
+        codec_input = tensor
+        orig_len = tensor.shape[-1]
+        if sample_rate != encodec_sr:
+            codec_input = julius.resample_frac(tensor, sample_rate, encodec_sr)
+
         with torch.no_grad():
-            # Encodec expects [B, C, T]
-            encoded_frames = ENCODEC_MODEL.encode(tensor)
+            encoded_frames = ENCODEC_MODEL.encode(codec_input)
             iter_tensor = ENCODEC_MODEL.decode(encoded_frames)
+
+        if sample_rate != encodec_sr:
+            iter_tensor = julius.resample_frac(iter_tensor, encodec_sr, sample_rate)
+            iter_tensor = iter_tensor[..., :orig_len]
+            if iter_tensor.shape[-1] < orig_len:
+                iter_tensor = torch.nn.functional.pad(
+                    iter_tensor,
+                    (0, orig_len - iter_tensor.shape[-1]),
+                )
 
         return audio_effect_return(tensor=iter_tensor, mask=mask)

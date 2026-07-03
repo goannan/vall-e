@@ -27,7 +27,7 @@ from pathlib import Path
 
 import torch
 import torch.multiprocessing
-from icefall.utils import get_executor
+from icefall.utils import get_executor, str2bool
 from lhotse import CutSet, NumpyHdf5Writer
 from lhotse.recipes.utils import read_manifests_if_cached
 from tqdm.auto import tqdm
@@ -78,7 +78,37 @@ def get_args():
         "--audio-extractor",
         type=str,
         default="Encodec",
-        help="Encodec or Fbank",
+        help="Encodec, VoiceMark, or Fbank",
+    )
+    parser.add_argument(
+        "--voicemark-root",
+        type=str,
+        default="/home/wu25/mrnas04home/projects/VoiceMark",
+        help="Path to the VoiceMark project root.",
+    )
+    parser.add_argument(
+        "--voicemark-config",
+        type=str,
+        default="STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json",
+        help="VoiceMark SpeechTokenizer config, absolute or relative to --voicemark-root.",
+    )
+    parser.add_argument(
+        "--voicemark-st-checkpoint",
+        type=str,
+        default="STmodels/pretrained_model/SpeechTokenizer.pt",
+        help="VoiceMark SpeechTokenizer checkpoint, absolute or relative to --voicemark-root.",
+    )
+    parser.add_argument(
+        "--voicemark-checkpoint",
+        type=str,
+        default="train/Log/spt_base/20260601-123358/WatermarkTrainer_final_00150000.pt",
+        help="VoiceMark watermark checkpoint, absolute or relative to --voicemark-root.",
+    )
+    parser.add_argument(
+        "--voicemark-embed-vq1",
+        type=str2bool,
+        default=True,
+        help="Whether VoiceMark embeds/detects watermark in VQ1-8 instead of VQ2-8.",
     )
     parser.add_argument(
         "--dataset-parts",
@@ -148,11 +178,21 @@ def main():
         text_tokenizer = TextTokenizer(backend=args.text_extractor)
 
     audio_extractor = None
+    audio_extractor_name = args.audio_extractor.lower() if args.audio_extractor else ""
     if args.audio_extractor:
-        if args.audio_extractor == "Encodec":
-            audio_extractor = AudioTokenExtractor(AudioTokenConfig())
+        if audio_extractor_name in {"encodec", "voicemark"}:
+            audio_extractor = AudioTokenExtractor(
+                AudioTokenConfig(
+                    backend=audio_extractor_name,
+                    voicemark_root=args.voicemark_root,
+                    voicemark_config=args.voicemark_config,
+                    voicemark_st_checkpoint=args.voicemark_st_checkpoint,
+                    voicemark_checkpoint=args.voicemark_checkpoint,
+                    voicemark_embed_vq1=args.voicemark_embed_vq1,
+                )
+            )
         else:
-            assert args.audio_extractor == "Fbank"
+            assert audio_extractor_name == "fbank"
             audio_extractor = get_fbank_extractor()
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
@@ -178,9 +218,9 @@ def main():
 
             # AudioTokenizer
             if args.audio_extractor:
-                if args.audio_extractor == "Encodec":
+                if audio_extractor_name in {"encodec", "voicemark"}:
                     storage_path = (
-                        f"{args.output_dir}/{args.prefix}_encodec_{partition}"
+                        f"{args.output_dir}/{args.prefix}_{audio_extractor_name}_{partition}"
                     )
                 else:
                     storage_path = (
@@ -188,7 +228,8 @@ def main():
                     )
 
                 if args.prefix.lower() in ["ljspeech", "aishell", "baker"]:
-                    cut_set = cut_set.resample(24000)
+                    target_sr = getattr(getattr(audio_extractor, "tokenizer", None), "sample_rate", 24000)
+                    cut_set = cut_set.resample(target_sr)
                     # https://github.com/lifeiteng/vall-e/issues/90
                     # if args.prefix == "aishell":
                     #     # NOTE: the loudness of aishell audio files is around -33
@@ -200,7 +241,7 @@ def main():
                 with torch.no_grad():
                     if (
                         torch.cuda.is_available()
-                        and args.audio_extractor == "Encodec"
+                        and audio_extractor_name in {"encodec", "voicemark"}
                     ):
                         cut_set = cut_set.compute_and_store_features_batch(
                             extractor=audio_extractor,

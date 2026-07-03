@@ -36,7 +36,6 @@ import torchaudio
 import torchaudio.functional as AF
 import numpy as np
 from icefall.utils import AttributeDict, str2bool
-from traceableSpeech.meldataset import mel_spectrogram
 
 try:
     from torchmetrics.functional.audio import pesq as tm_pesq
@@ -70,8 +69,6 @@ try:
     from pystoi import stoi as stoi_pkg
 except Exception:
     stoi_pkg = None
-
-from traceableSpeech.watermark import Random_watermark  # attack, clip
 
 try:
     from .attacks import AudioEffects
@@ -175,7 +172,7 @@ def get_args():
         "--ts-enable",
         type=str2bool,
         default=False,
-        help="Whether to enable TraceableSpeech.",
+        help="Legacy switch for --watermark-backend traceablespeech.",
     )
 
     parser.add_argument(
@@ -183,6 +180,49 @@ def get_args():
         type=str,
         default="traceableSpeech/g_00150000",
         help="The checkpoint file of TraceableSpeech model.",
+    )
+
+    parser.add_argument(
+        "--watermark-backend",
+        type=str,
+        default="encodec",
+        choices=["encodec", "traceablespeech", "voicemark"],
+        help="Codec/watermark backend used by AudioTokenizer.",
+    )
+
+    parser.add_argument(
+        "--voicemark-root",
+        type=str,
+        default="/home/wu25/mrnas04home/projects/VoiceMark",
+        help="Path to the VoiceMark project root.",
+    )
+
+    parser.add_argument(
+        "--voicemark-config",
+        type=str,
+        default="STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json",
+        help="VoiceMark SpeechTokenizer config, absolute or relative to --voicemark-root.",
+    )
+
+    parser.add_argument(
+        "--voicemark-st-checkpoint",
+        type=str,
+        default="STmodels/pretrained_model/SpeechTokenizer.pt",
+        help="VoiceMark SpeechTokenizer checkpoint, absolute or relative to --voicemark-root.",
+    )
+
+    parser.add_argument(
+        "--voicemark-checkpoint",
+        type=str,
+        default="train/Log/spt_base/20260601-123358/WatermarkTrainer_final_00150000.pt",
+        help="VoiceMark watermark checkpoint, absolute or relative to --voicemark-root.",
+    )
+
+    parser.add_argument(
+        "--voicemark-embed-vq1",
+        type=str2bool,
+        default=True,
+        help="Whether VoiceMark embeds/detects watermark in VQ1-8 instead of VQ2-8.",
     )
 
     return parser.parse_args()
@@ -308,12 +348,23 @@ def main():
     model, text_tokens = load_model(args.checkpoint, device)
     text_collater = get_text_token_collater(text_tokens)
 
+    watermark_backend = args.watermark_backend
+    if args.ts_enable and watermark_backend == "encodec":
+        watermark_backend = "traceablespeech"
+
     ts_config = Path(args.ts_checkpoint_file).parent / "config.json"
     audio_tokenizer = AudioTokenizer(
         enable_ts=args.ts_enable,
         ts_checkpoint=args.ts_checkpoint_file,
         ts_config=str(ts_config),
+        watermark_backend=watermark_backend,
+        voicemark_root=args.voicemark_root,
+        voicemark_config=args.voicemark_config,
+        voicemark_st_checkpoint=args.voicemark_st_checkpoint,
+        voicemark_checkpoint=args.voicemark_checkpoint,
+        voicemark_embed_vq1=args.voicemark_embed_vq1,
     )
+    audio_sample_rate = audio_tokenizer.sample_rate
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
@@ -326,7 +377,7 @@ def main():
             if False:
                 samples = audio_tokenizer.decode(encoded_frames)
                 torchaudio.save(
-                    f"{args.output_dir}/p{n}.wav", samples[0], 24000
+                    f"{args.output_dir}/p{n}.wav", samples[0], audio_sample_rate
                 )
 
             audio_prompts.append(encoded_frames[0][0])
@@ -359,20 +410,20 @@ def main():
 
     # New attacks powered by AudioEffects. Speed fixed to 1.2.
     attack_fns = [
-        ("speed", lambda wav: AudioEffects.speed(wav, speed_range=(1.2, 1.2))),
-        ("updownresample", lambda wav: AudioEffects.updownresample(wav)),
-        ("echo", lambda wav: AudioEffects.echo(wav)),
+        ("speed", lambda wav: AudioEffects.speed(wav, speed_range=(1.2, 1.2), sample_rate=audio_sample_rate)),
+        ("updownresample", lambda wav: AudioEffects.updownresample(wav, sample_rate=audio_sample_rate)),
+        ("echo", lambda wav: AudioEffects.echo(wav, sample_rate=audio_sample_rate)),
         ("random_noise", lambda wav: AudioEffects.random_noise(wav)),
         ("pink_noise", lambda wav: AudioEffects.pink_noise(wav)),
-        ("lowpass_filter", lambda wav: AudioEffects.lowpass_filter(wav)),
-        ("highpass_filter", lambda wav: AudioEffects.highpass_filter(wav)),
-        ("bandpass_filter", lambda wav: AudioEffects.bandpass_filter(wav)),
+        ("lowpass_filter", lambda wav: AudioEffects.lowpass_filter(wav, sample_rate=audio_sample_rate)),
+        ("highpass_filter", lambda wav: AudioEffects.highpass_filter(wav, sample_rate=audio_sample_rate)),
+        ("bandpass_filter", lambda wav: AudioEffects.bandpass_filter(wav, sample_rate=audio_sample_rate)),
         ("smooth", lambda wav: AudioEffects.smooth(wav)),
         ("boost_audio", lambda wav: AudioEffects.boost_audio(wav)),
         ("duck_audio", lambda wav: AudioEffects.duck_audio(wav)),
         ("identity", lambda wav: AudioEffects.identity(wav)),
         ("shush", lambda wav: AudioEffects.shush(wav)),
-        ("encodec", lambda wav: AudioEffects.encodec(wav)),
+        ("encodec", lambda wav: AudioEffects.encodec(wav, sample_rate=audio_sample_rate)),
     ]
     attack_stats = {name: {"count": 0, "bits_correct": 0, "bits_total": 0} for name, _ in attack_fns}
 
@@ -419,7 +470,7 @@ def main():
                     [(encoded_frames.transpose(2, 1), None)]
                 )
                 # store
-                torchaudio.save(audio_path, samples[0].cpu(), 24000)
+                torchaudio.save(audio_path, samples[0].cpu(), audio_sample_rate)
         return
     else:
         texts = args.text.split("|")
@@ -476,12 +527,7 @@ def main():
                 logging.warning(f"Skip utt {n}: zero-length sequence after transpose (early EOS).")
                 continue
 
-            # watermark sign
-            watermark_sign = None
-            if args.ts_enable and getattr(audio_tokenizer, "_ts_available", False):
-                watermark_sign = Random_watermark(encoded_frames.size(0)).to(
-                    audio_tokenizer.device
-                )
+            watermark_sign = audio_tokenizer.random_watermark(encoded_frames.size(0))
 
             # decode both reference (zero watermark) and watermarked in one call
             decoded_clean, decoded_wm = audio_tokenizer.decode_pair(
@@ -489,14 +535,14 @@ def main():
             )
 
             clean_path = Path(args.output_dir) / f"{n}_clean.wav"
-            torchaudio.save(str(clean_path), decoded_clean[0].cpu(), 24000)
+            torchaudio.save(str(clean_path), decoded_clean[0].cpu(), audio_sample_rate)
 
             if decoded_wm is not None:
                 wm_path = Path(args.output_dir) / f"{n}_wm.wav"
-                torchaudio.save(str(wm_path), decoded_wm[0].cpu(), 24000)
+                torchaudio.save(str(wm_path), decoded_wm[0].cpu(), audio_sample_rate)
 
                 pesq_score, stoi_score = compute_pesq_stoi(
-                    decoded_clean, decoded_wm, 24000
+                    decoded_clean, decoded_wm, audio_sample_rate
                 )
                 if pesq_score is not None and stoi_score is not None:
                     logging.info(
@@ -505,78 +551,43 @@ def main():
                     pesq_list.append(pesq_score)
                     stoi_list.append(stoi_score)
 
-                # Watermark detection using TraceableSpeech decoder
-                if getattr(audio_tokenizer, "_ts_available", False) and getattr(
-                    audio_tokenizer, "_watermark_decoder", None
-                ) is not None and getattr(audio_tokenizer, "_h", None) is not None:
-                    h_cfg = audio_tokenizer._h
-                    wm_wav = decoded_wm.squeeze(1)
-                    pad_need = int((h_cfg.n_fft - h_cfg.hop_size) / 2)
-                    if wm_wav.shape[-1] <= pad_need:
-                        logging.warning(
-                            f"Watermark detect skipped (utt {n}): audio too short for mel padding."
-                        )
-                    else:
-                        mel = mel_spectrogram(
-                            wm_wav,
-                            h_cfg.n_fft,
-                            h_cfg.num_mels,
-                            h_cfg.sampling_rate,
-                            h_cfg.hop_size,
-                            h_cfg.win_size,
-                            h_cfg.fmin,
-                            h_cfg.fmax_for_loss,
-                        )
-                        sign_score, sign_pred = audio_tokenizer._watermark_decoder(mel)
-                        bits_total = watermark_sign.numel()
-                        bits_match = (
-                            sign_pred == watermark_sign.to(sign_pred.device)
+                detection = audio_tokenizer.detect_watermark(decoded_wm)
+                if detection is not None and watermark_sign is not None:
+                    detect_prob, sign_pred, _ = detection
+                    bits_total = watermark_sign.numel()
+                    bits_match = (
+                        sign_pred == watermark_sign.to(sign_pred.device)
+                    ).sum().item()
+                    logging.info(
+                        f"Watermark prob={detect_prob.mean().item():.4f}, bits {bits_match}/{bits_total} (utt {n})"
+                    )
+                    wm_bits_correct += bits_match
+                    wm_bits_total += bits_total
+
+                    # Attack-based watermark robustness check using AudioEffects
+                    for attack_name, attack_fn in attack_fns:
+                        attacked = attack_fn(decoded_wm.clone())
+                        if not isinstance(attacked, torch.Tensor):
+                            # AudioEffects can return (tensor, mask); only tensor is needed here.
+                            attacked = attacked[0]
+
+                        attacked_detection = audio_tokenizer.detect_watermark(attacked)
+                        if attacked_detection is None:
+                            continue
+                        _, sign_pred_attacked, _ = attacked_detection
+                        bits_match_attacked = (
+                            sign_pred_attacked
+                            == watermark_sign.to(sign_pred_attacked.device)
                         ).sum().item()
+                        attack_stats[attack_name]["count"] += 1
+                        attack_stats[attack_name]["bits_correct"] += bits_match_attacked
+                        attack_stats[attack_name]["bits_total"] += bits_total
                         logging.info(
-                            f"Watermark bits match {bits_match}/{bits_total} (utt {n})"
+                            f"Watermark attack {attack_name}: bits {bits_match_attacked}/{bits_total} (utt {n})"
                         )
-                        wm_bits_correct += bits_match
-                        wm_bits_total += bits_total
-
-                        # Attack-based watermark robustness check using AudioEffects
-                        for attack_name, attack_fn in attack_fns:
-                            attacked = attack_fn(decoded_wm.clone())
-                            if not isinstance(attacked, torch.Tensor):
-                                # AudioEffects can return (tensor, mask); only tensor is needed here.
-                                attacked = attacked[0]
-
-                            if attacked.shape[-1] <= pad_need:
-                                logging.warning(
-                                    f"Watermark attack skipped (utt {n}, op {attack_name}): audio too short after attack."
-                                )
-                                continue
-
-                            mel_attacked = mel_spectrogram(
-                                attacked.squeeze(1),
-                                h_cfg.n_fft,
-                                h_cfg.num_mels,
-                                h_cfg.sampling_rate,
-                                h_cfg.hop_size,
-                                h_cfg.win_size,
-                                h_cfg.fmin,
-                                h_cfg.fmax_for_loss,
-                            )
-                            _, sign_pred_attacked = audio_tokenizer._watermark_decoder(
-                                mel_attacked
-                            )
-                            bits_match_attacked = (
-                                sign_pred_attacked
-                                == watermark_sign.to(sign_pred_attacked.device)
-                            ).sum().item()
-                            attack_stats[attack_name]["count"] += 1
-                            attack_stats[attack_name]["bits_correct"] += bits_match_attacked
-                            attack_stats[attack_name]["bits_total"] += bits_total
-                            logging.info(
-                                f"Watermark attack {attack_name}: bits {bits_match_attacked}/{bits_total} (utt {n})"
-                            )
             else:
                 logging.warning(
-                    "TraceableSpeech watermark unavailable; metrics skipped."
+                    "Watermark backend unavailable; metrics skipped."
                 )
         else:  # Transformer
             pass
