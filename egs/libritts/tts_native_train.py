@@ -233,10 +233,10 @@ class TTSNativeTrainer:
 
     def detect_watermark(self, audio: torch.Tensor, return_logits: bool = True):
         generator = self.accelerator.unwrap_model(self.generator)
-        detector = self.accelerator.unwrap_model(self.detector)
         embedding = generator.forward_feature(audio)
         if return_logits:
-            return detector(embedding)
+            return self.detector(embedding)
+        detector = self.accelerator.unwrap_model(self.detector)
         return detector.detect_watermark(embedding)
 
     def validate(self, step: int):
