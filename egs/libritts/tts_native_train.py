@@ -44,10 +44,6 @@ from STmodels.discriminators import (
     MultiScaleSTFTDiscriminator,
 )
 from models import WMEmbedder, WMDetector
-try:
-    from attacks.augmentation import attack_augmentation
-except ImportError:
-    from augmentation import attack_augmentation
 
 try:
     from optimizer import get_optimizer
@@ -67,6 +63,12 @@ from tts_native_loss import (
     vad_based_loss,
 )
 from tts_native_dataset import get_tts_native_dataloader
+from tts_native_attacks import (
+    apply_train_augmentation,
+    get_validation_attack_suite,
+    format_codec_eval_table,
+    release_codec_models,
+)
 
 
 class TTSNativeTrainer:
@@ -78,6 +80,8 @@ class TTSNativeTrainer:
         self.lr = cfg.get("learning_rate", 5e-5)
         self.initial_lr = cfg.get("initial_learning_rate", 1e-6)
         self.num_warmup_steps = cfg.get("num_warmup_steps", 1000)
+        self.val_steps = cfg.get("val_steps", 1000)
+        self.num_val_samples = cfg.get("num_val_samples", 50)
         self.seed = cfg.get("seed", 1234)
 
         # Loss weights
@@ -105,7 +109,6 @@ class TTSNativeTrainer:
         run_name = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.results_folder = base_results / run_name
         self.steps = torch.tensor(0)
-        self.best_val_loss = float("inf")
 
         if self.is_main:
             self.results_folder.mkdir(parents=True, exist_ok=True)
@@ -117,8 +120,8 @@ class TTSNativeTrainer:
         # Models Init
         # ---------------------------------------------------------
         print("[Init] Loading SpeechTokenizer...")
-        st_cfg = str(NEUMARK_ROOT / cfg.get("neumark_config", cfg.get("voicemark_config")))
-        st_ckpt = str(NEUMARK_ROOT / cfg.get("neumark_st_checkpoint", cfg.get("voicemark_st_checkpoint")))
+        st_cfg = str(NEUMARK_ROOT / cfg.get("neumark_config", "STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json"))
+        st_ckpt = str(NEUMARK_ROOT / cfg.get("neumark_st_checkpoint", "STmodels/pretrained_model/SpeechTokenizer.pt"))
         self.generator = SpeechTokenizer.load_from_checkpoint(st_cfg, st_ckpt).to(self.device)
         self.generator.eval()
         for p in self.generator.parameters():
@@ -226,10 +229,96 @@ class TTSNativeTrainer:
 
     def detect_watermark(self, audio: torch.Tensor, return_logits: bool = True):
         generator = self.accelerator.unwrap_model(self.generator)
+        detector = self.accelerator.unwrap_model(self.detector)
         embedding = generator.forward_feature(audio)
         if return_logits:
-            return self.detector(embedding)
-        return self.accelerator.unwrap_model(self.detector).detect_watermark(embedding)
+            return detector(embedding)
+        return detector.detect_watermark(embedding)
+
+    def validate(self, step: int):
+        """Evaluate watermark extraction and VAD across the required Neural Codec suite."""
+        if not self.is_main:
+            return
+
+        print(f"\n[Validation @ Step {step:07d}] Running Neural Codec Robustness Suite ({self.num_val_samples} samples)...")
+        generator = self.accelerator.unwrap_model(self.generator)
+        detector = self.accelerator.unwrap_model(self.detector)
+        msg_proc = self.accelerator.unwrap_model(self.msg_processor)
+
+        generator.eval()
+        detector.eval()
+        msg_proc.eval()
+
+        val_attacks = get_validation_attack_suite(self.sample_rate)
+        results = {}
+        for family, bitrate, _ in val_attacks:
+            key = f"{family}::{bitrate}"
+            results[key] = {"bit_matches": 0, "total_bits": 0, "det_matches": 0, "total_frames": 0}
+
+        with torch.no_grad():
+            count = 0
+            for batch in self.valid_dl:
+                if count >= self.num_val_samples:
+                    break
+
+                codes = batch["codes"].to(self.device)  # [1, 8, T]
+                batch_size = codes.size(0)
+                message = torch.randint(0, 2, (batch_size, 16), dtype=torch.int64, device=self.device)
+
+                codes_qbt = codes.permute(1, 0, 2).contiguous() if codes.shape[1] == 8 else codes
+                quantized_layers = [generator.quantizer.decode(codes_qbt[k : k + 1], st=k) for k in range(8)]
+                watermarked_layers = [msg_proc(q, message) for q in quantized_layers]
+                z_wm = sum(watermarked_layers)
+                wm_audio = generator.decoder(z_wm)
+
+                for family, bitrate, atk_fn in val_attacks:
+                    key = f"{family}::{bitrate}"
+                    try:
+                        attacked_audio = atk_fn(wm_audio)
+                    except Exception as e:
+                        attacked_audio = wm_audio
+
+                    embedding = generator.forward_feature(attacked_audio)
+                    logits, chunk_logits = detector(embedding)
+
+                    # Extract bits
+                    pred_bits = detector.detect_watermark(embedding)  # [B, 16]
+                    bit_correct = (pred_bits.long() == message.long()).sum().item()
+                    total_b = message.numel()
+
+                    # VAD accuracy (ground truth = 1.0 for full audio)
+                    det_correct = (logits > 0.0).sum().item()
+                    total_f = logits.numel()
+
+                    results[key]["bit_matches"] += bit_correct
+                    results[key]["total_bits"] += total_b
+                    results[key]["det_matches"] += det_correct
+                    results[key]["total_frames"] += total_f
+
+                count += 1
+
+        # Summary statistics
+        summary = {}
+        for key, stats in results.items():
+            bit_acc = (stats["bit_matches"] / max(1, stats["total_bits"])) * 100.0
+            ber = 100.0 - bit_acc
+            det_acc = (stats["det_matches"] / max(1, stats["total_frames"])) * 100.0
+            summary[key] = {"bit_acc": bit_acc, "ber": ber, "detect_acc": det_acc}
+
+            # Tensorboard log
+            family, bitrate = key.split("::")
+            tag = f"val/{family.lower()}_{bitrate.replace(' ', '_').replace('.', '_')}"
+            self.writer.add_scalar(f"{tag}/bit_acc", bit_acc, global_step=step)
+            self.writer.add_scalar(f"{tag}/ber", ber, global_step=step)
+            self.writer.add_scalar(f"{tag}/detect_acc", det_acc, global_step=step)
+
+        # Print formatted table
+        table_str = format_codec_eval_table(step, summary)
+        print(table_str)
+
+        # Release cached attack models from GPU memory
+        release_codec_models()
+        print(f"[Validation @ Step {step:07d}] Codec cache released. Returning to training.\n")
 
     def train(self):
         print(f"[Training] Starting TTS-Native Watermark Training for {self.epochs} epochs...")
@@ -319,9 +408,9 @@ class TTSNativeTrainer:
                         torch.stack(list(adversarial_components.values())).mean() + 2.0 * loss_fm
                     ) * self.adv_loss_lambda
 
-                # F. Watermark Decoding & Detection Loss
-                augmented_audio, vad_labels, _ = attack_augmentation(
-                    wm_audio, sample_rate=self.sample_rate, attack_name=None, orig_audio=real_audio, allow_heavy=True
+                # F. Watermark Decoding & Detection Loss (Strictly Encodec 3/6/12k, VC Masking, Clean)
+                augmented_audio, vad_labels, attack_name = apply_train_augmentation(
+                    wm_audio, sample_rate=self.sample_rate, orig_audio=real_audio
                 )
                 logits, chunk_logits = self.detect_watermark(augmented_audio, return_logits=True)
 
@@ -332,8 +421,8 @@ class TTSNativeTrainer:
                 loss_vad_pos = vad_based_loss(logits[..., :min_lens_pos], vad_labels[..., :min_lens_pos], from_logits=True) * self.vad_loss_lambda
 
                 # Negative sample supervision (Real unwatermarked audio)
-                augmented_neg, _, _ = attack_augmentation(
-                    real_audio, sample_rate=self.sample_rate, attack_name=None, allow_heavy=True
+                augmented_neg, _, _ = apply_train_augmentation(
+                    real_audio, sample_rate=self.sample_rate, orig_audio=None
                 )
                 neg_logits, _ = self.detect_watermark(augmented_neg, return_logits=True)
                 vad_labels_neg = torch.zeros_like(neg_logits)
@@ -404,7 +493,7 @@ class TTSNativeTrainer:
                         "system/vram_reserved_gb": res_gb,
                     }
                     if self.is_main and (steps in {1, 5, 10} or steps % self.cfg.get("log_steps", 50) == 0):
-                        print(f"\n[GPU VRAM @ Step {steps:05d}] Current: {alloc_gb:.2f} GB | Max Peak: {max_alloc_gb:.2f} GB | Reserved: {res_gb:.2f} GB | Batch Size: {batch_size}")
+                        print(f"\n[GPU VRAM @ Step {steps:05d}] Current: {alloc_gb:.2f} GB | Max Peak: {max_alloc_gb:.2f} GB | Reserved: {res_gb:.2f} GB | Attack: {attack_name}")
 
                 if steps % self.cfg.get("log_steps", 50) == 0 or steps in {1, 5, 10}:
                     log_dict = {
@@ -423,7 +512,15 @@ class TTSNativeTrainer:
                     log_dict.update(vram_info)
                     self.log(log_dict, step=steps)
 
-                # Validation & Checkpointing
+                # Validation Loop
+                if steps > 0 and steps % self.val_steps == 0:
+                    self.validate(steps)
+                    self.msg_processor.train()
+                    self.detector.train()
+                    for d in self.discriminators.values():
+                        d.train()
+
+                # Checkpointing
                 if steps > 0 and steps % self.cfg.get("save_steps", 5000) == 0:
                     self.save(steps, epoch)
 
