@@ -126,7 +126,7 @@ class TTSNativeTrainer:
 
         print("[Init] Creating Watermark Embedder & Detector...")
         self.msg_processor = WMEmbedder(nbits=16, input_dim=1024, nchunk_size=4).to(self.device)
-        self.detector = WMDetector(input_dim=1024, nbits=16, nchunk_size=4).to(self.device)
+        self.detector = WMDetector(input_channels=1024, nbits=16, nchunk_size=4).to(self.device)
 
         print("[Init] Initializing Speech Realism Discriminators...")
         self.discriminators = {
