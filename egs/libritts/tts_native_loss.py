@@ -1,5 +1,6 @@
 import sys
 import os
+import importlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -12,12 +13,25 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parents[1]
 NEUMARK_ROOT = PROJECT_DIR.parent / "NeuMark"
 
-# Add VoiceMark and UniSpeech to sys.path
-for p in [str(NEUMARK_ROOT), str(NEUMARK_ROOT / "train"), str(SCRIPT_DIR / "tools/seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification")]:
-    if p not in sys.path and os.path.exists(p):
+# Insert NeuMark root at index 0 to ensure priority
+for p in [str(NEUMARK_ROOT / "train"), str(NEUMARK_ROOT)]:
+    if p in sys.path:
+        sys.path.remove(p)
+    if os.path.exists(p):
         sys.path.insert(0, p)
 
-from loss import (
+try:
+    from losses import (
+        adversarial_loss_d,
+        adversarial_loss_g,
+        bits_to_chunks,
+        cos_loss,
+        decoding_loss,
+        feature_loss,
+        vad_based_loss,
+    )
+except ImportError:
+    from loss import (
     adversarial_loss_d,
     adversarial_loss_g,
     bits_to_chunks,
@@ -65,9 +79,7 @@ class UTMOSLoss(nn.Module):
         if audio.shape[-1] < 400:
             return torch.zeros((), device=audio.device, requires_grad=True)
 
-        # UTMOS forward
         scores = self.model(audio, 16000)  # [B, 1] or [B]
-        # Loss is negative score (higher MOS -> lower loss)
         loss = -scores.mean()
         return loss
 
@@ -87,14 +99,27 @@ class SpeakerSimLoss(nn.Module):
         self.available = False
         if os.path.exists(checkpoint_path):
             try:
+                sv_dir = str(SCRIPT_DIR / "tools/seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification")
+                # Temporarily add sv_dir to sys.path and remove after import
+                orig_sys_path = list(sys.path)
+                if sv_dir not in sys.path:
+                    sys.path.insert(0, sv_dir)
+
                 from verification import init_model
                 self.model = init_model("wavlm_large", checkpoint=checkpoint_path)
                 self.model.eval()
                 self.model.requires_grad_(False)
                 self.model.to(self.device)
                 self.available = True
+
+                # Restore sys.path so speaker_verification/models/ does not shadow NeuMark/models.py
+                sys.path = orig_sys_path
+                # Clean up shadowed 'models' module from sys.modules if needed
+                if "models" in sys.modules and hasattr(sys.modules["models"], "__file__") and "speaker_verification" in sys.modules["models"].__file__:
+                    del sys.modules["models"]
             except Exception as e:
-                print(f"[Warning] Failed to initialize WavLM SV model: {e}. SpeakerSimLoss will fall back to Cosine.")
+                print(f"[Warning] Failed to initialize WavLM SV model: {e}. SpeakerSimLoss will fall back.")
+                self.available = False
         else:
             print(f"[Warning] WavLM checkpoint not found at {checkpoint_path}. SpeakerSimLoss will fall back.")
 
@@ -113,10 +138,8 @@ class SpeakerSimLoss(nn.Module):
             prompt_audio = torchaudio.functional.resample(prompt_audio, sample_rate, 16000)
 
         if not self.available:
-            # Fallback: simple spectrogram or feature cosine similarity
             return cos_loss(wm_audio, prompt_audio[..., :wm_audio.shape[-1]])
 
-        # Extract embeddings
         emb_wm = self.model(wm_audio)  # [B, D]
         with torch.no_grad():
             emb_prompt = self.model(prompt_audio)  # [B, D]
@@ -147,7 +170,6 @@ class ASRLoss(nn.Module):
         targets = []
         lengths = []
         for t in texts:
-            # Standardize text for Wav2Vec2 (uppercase, only supported chars)
             clean_t = t.upper().replace("\n", " ").strip()
             ids = [self.char2id[c] for c in clean_t if c in self.char2id]
             if not ids:
@@ -157,10 +179,6 @@ class ASRLoss(nn.Module):
         return torch.tensor(targets, dtype=torch.long, device=self.device), torch.tensor(lengths, dtype=torch.long, device=self.device)
 
     def forward(self, audio: torch.Tensor, texts: List[str], sample_rate: int = 16000) -> torch.Tensor:
-        """
-        Inputs: audio [B, 1, T] or [B, T], texts list of length B
-        Output: scalar CTC loss
-        """
         if audio.ndim == 3:
             audio = audio.squeeze(1)
 

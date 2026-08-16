@@ -16,7 +16,7 @@ cd "${WORK_DIR}"
 mkdir -p logs
 
 # Environment setup
-PYENV_VERSION=${PYENV_VERSION:-valle}
+PYENV_VERSION=${PYENV_VERSION:-voicemark}
 if [ "${PYENV_VERSION}" != "none" ]; then
   export PYENV_ROOT="${HOME}/mrnas04home/.pyenv"
   if [ ! -d "${PYENV_ROOT}" ]; then

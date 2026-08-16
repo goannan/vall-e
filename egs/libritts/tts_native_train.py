@@ -29,11 +29,12 @@ NEUMARK_ROOT = PROJECT_DIR.parent / "NeuMark"
 
 for p in [
     str(SCRIPT_DIR),
-    str(NEUMARK_ROOT),
     str(NEUMARK_ROOT / "train"),
-    str(SCRIPT_DIR / "tools/seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification"),
+    str(NEUMARK_ROOT),
 ]:
-    if p not in sys.path and os.path.exists(p):
+    if p in sys.path:
+        sys.path.remove(p)
+    if os.path.exists(p):
         sys.path.insert(0, p)
 
 from STmodels.model import SpeechTokenizer
@@ -43,8 +44,15 @@ from STmodels.discriminators import (
     MultiScaleSTFTDiscriminator,
 )
 from models import WMEmbedder, WMDetector
-from optimizer import get_optimizer
-from augmentation import attack_augmentation, ATTACK_REGISTRY
+try:
+    from attacks.augmentation import attack_augmentation
+except ImportError:
+    from augmentation import attack_augmentation
+
+try:
+    from optimizer import get_optimizer
+except ImportError:
+    from train.optimizer import get_optimizer
 
 from tts_native_loss import (
     UTMOSLoss,
