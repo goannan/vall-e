@@ -4,6 +4,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import julius
 import torch
 import torch.nn.functional as F
+import torchaudio
 
 # Import attack implementations
 try:
@@ -22,6 +23,39 @@ except ImportError:
     SNAC = None
 
 
+def edit_distance(seq1, seq2) -> int:
+    m, n = len(seq1), len(seq2)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m + 1):
+        dp[i][0] = i
+    for j in range(n + 1):
+        dp[0][j] = j
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if seq1[i - 1] == seq2[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1]
+            else:
+                dp[i][j] = 1 + min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1])
+    return dp[m][n]
+
+
+def compute_wer_cer(ref: str, hyp: str) -> Tuple[float, float]:
+    ref_clean = ref.strip().upper()
+    hyp_clean = hyp.strip().upper()
+
+    # Word Error Rate
+    r_words = ref_clean.split()
+    h_words = hyp_clean.split()
+    wer = (edit_distance(r_words, h_words) / max(1, len(r_words))) if r_words else 0.0
+
+    # Character Error Rate
+    r_chars = list(ref_clean.replace(" ", "|"))
+    h_chars = list(hyp_clean.replace(" ", "|"))
+    cer = (edit_distance(r_chars, h_chars) / max(1, len(r_chars))) if r_chars else 0.0
+
+    return min(1.0, wer), min(1.0, cer)
+
+
 def _match_audio_length(audio: torch.Tensor, target_len: int) -> torch.Tensor:
     if audio.shape[-1] > target_len:
         return audio[..., :target_len]
@@ -31,7 +65,80 @@ def _match_audio_length(audio: torch.Tensor, target_len: int) -> torch.Tensor:
 
 
 # -----------------------------------------------------------------------------
-# 1. Encodec Attack Wrapper (24kHz standard model)
+# 1. DSP Audio Effects
+# -----------------------------------------------------------------------------
+class AudioEffects:
+    @staticmethod
+    def identity(wav: torch.Tensor) -> torch.Tensor:
+        return wav
+
+    @staticmethod
+    def random_noise(wav: torch.Tensor, noise_std: float = 0.001) -> torch.Tensor:
+        return wav + torch.randn_like(wav) * noise_std
+
+    @staticmethod
+    def pink_noise(wav: torch.Tensor, noise_std: float = 0.01) -> torch.Tensor:
+        length = wav.shape[-1]
+        num_rows = 16
+        array = torch.randn(num_rows, length // num_rows + 1, device=wav.device)
+        reshaped = torch.cumsum(array, dim=1).reshape(-1)[:length]
+        pink = reshaped / torch.max(torch.abs(reshaped) + 1e-8)
+        return wav + pink * noise_std
+
+    @staticmethod
+    def lowpass_filter(wav: torch.Tensor, cutoff_freq: float = 5000, sample_rate: int = 16000) -> torch.Tensor:
+        return torchaudio.functional.lowpass_biquad(wav, sample_rate=sample_rate, cutoff_freq=cutoff_freq)
+
+    @staticmethod
+    def highpass_filter(wav: torch.Tensor, cutoff_freq: float = 500, sample_rate: int = 16000) -> torch.Tensor:
+        return torchaudio.functional.highpass_biquad(wav, sample_rate=sample_rate, cutoff_freq=cutoff_freq)
+
+    @staticmethod
+    def bandpass_filter(wav: torch.Tensor, cutoff_freq_low: float = 300, cutoff_freq_high: float = 8000, sample_rate: int = 16000) -> torch.Tensor:
+        mid = (cutoff_freq_low + cutoff_freq_high) / 2
+        bw = cutoff_freq_high - cutoff_freq_low
+        q = mid / max(1.0, bw)
+        return torchaudio.functional.bandpass_biquad(wav, sample_rate=sample_rate, central_freq=mid, Q=q)
+
+    @staticmethod
+    def echo(wav: torch.Tensor, volume: float = 0.3, duration: float = 0.2, sample_rate: int = 16000) -> torch.Tensor:
+        delay = int(sample_rate * duration)
+        if delay >= wav.shape[-1]:
+            return wav
+        echo_sig = torch.zeros_like(wav)
+        echo_sig[..., delay:] = wav[..., :-delay] * volume
+        return wav + echo_sig
+
+    @staticmethod
+    def smooth(wav: torch.Tensor, window_size: int = 5) -> torch.Tensor:
+        kernel = torch.ones(1, 1, window_size, device=wav.device) / window_size
+        padded = F.pad(wav, (window_size // 2, window_size // 2), mode="reflect")
+        return F.conv1d(padded, kernel)
+
+    @staticmethod
+    def boost_audio(wav: torch.Tensor, amount: float = 10) -> torch.Tensor:
+        gain = 10 ** (amount / 20)
+        return wav * gain
+
+    @staticmethod
+    def duck_audio(wav: torch.Tensor, amount: float = 10) -> torch.Tensor:
+        gain = 10 ** (-amount / 20)
+        return wav * gain
+
+    @staticmethod
+    def updownresample(wav: torch.Tensor, sample_rate: int = 16000, intermediate_freq: int = 32000) -> torch.Tensor:
+        resampled = julius.resample_frac(wav, sample_rate, intermediate_freq)
+        return julius.resample_frac(resampled, intermediate_freq, sample_rate)
+
+    @staticmethod
+    def speed(wav: torch.Tensor, speed_factor: float = 1.1, sample_rate: int = 16000) -> torch.Tensor:
+        orig_len = wav.shape[-1]
+        stretched = julius.resample_frac(wav, int(sample_rate * speed_factor), sample_rate)
+        return _match_audio_length(stretched, orig_len)
+
+
+# -----------------------------------------------------------------------------
+# 2. Neural Codec Attacks (Encodec, DAC, SNAC)
 # -----------------------------------------------------------------------------
 class EncodecAttack:
     _model = None
@@ -68,9 +175,6 @@ class EncodecAttack:
         cls._model = None
 
 
-# -----------------------------------------------------------------------------
-# 2. DAC Attack Wrapper (16kHz, 24kHz, 44.1kHz)
-# -----------------------------------------------------------------------------
 class DACAttack:
     _models = {}
 
@@ -107,9 +211,6 @@ class DACAttack:
         cls._models.clear()
 
 
-# -----------------------------------------------------------------------------
-# 3. SNAC Attack Wrapper (24kHz 0.98kbps, 32kHz 1.9kbps, 44.1kHz 2.6kbps)
-# -----------------------------------------------------------------------------
 class SNACAttack:
     _models = {}
 
@@ -149,7 +250,6 @@ class SNACAttack:
 
 
 def release_codec_models():
-    """Release cached attack models to free VRAM."""
     EncodecAttack.release()
     DACAttack.release()
     SNACAttack.release()
@@ -158,7 +258,7 @@ def release_codec_models():
 
 
 # -----------------------------------------------------------------------------
-# 4. Voice Conversion / Masking Attack for VAD Supervision
+# 3. Voice Conversion Masking for VAD Supervision
 # -----------------------------------------------------------------------------
 def apply_masking(audio: torch.Tensor, orig_audio: Optional[torch.Tensor], mask_prob: float = 0.2) -> Tuple[torch.Tensor, torch.Tensor]:
     B, C, T = audio.shape
@@ -186,83 +286,221 @@ def apply_masking(audio: torch.Tensor, orig_audio: Optional[torch.Tensor], mask_
 
 
 # -----------------------------------------------------------------------------
-# 5. Training Attack Function (Only Identity, Masking, EnCodec 3/6/12 kbps)
+# 4. Training Augmentation (Full DSP + Neural Codec + VC Masking)
 # -----------------------------------------------------------------------------
 def apply_train_augmentation(
     audio: torch.Tensor, sample_rate: int = 16000, orig_audio: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor, str]:
     B, C, T = audio.shape
     n_frames = T // 320
+    vad_labels = torch.ones(B, n_frames, device=audio.device)
 
-    # User specified: Only Identity, VC Masking, and Encodec 3, 6, 12 kbps
+    # Complete list of Training Attacks: Clean + DSP + Codecs + VC Masking
     attacks = [
         "identity",
         "vc_masking",
+        "gaussian_noise",
+        "pink_noise",
+        "lowpass",
+        "highpass",
+        "bandpass",
+        "echo",
+        "smooth",
+        "resample",
+        "volume_boost",
+        "volume_duck",
+        "speed",
         "encodec_3kbps",
         "encodec_6kbps",
         "encodec_12kbps",
     ]
-    # Balanced weights: 30% clean, 20% masking, 50% Encodec
-    weights = [3, 2, 2, 2, 2]
+    # Balanced weights across clean, VC, DSP and Codec categories
+    weights = [
+        4,  # identity
+        3,  # vc_masking
+        1,  # gaussian_noise
+        1,  # pink_noise
+        1,  # lowpass
+        1,  # highpass
+        1,  # bandpass
+        1,  # echo
+        1,  # smooth
+        1,  # resample
+        1,  # volume_boost
+        1,  # volume_duck
+        1,  # speed
+        2,  # encodec_3kbps
+        2,  # encodec_6kbps
+        2,  # encodec_12kbps
+    ]
     attack_name = random.choices(attacks, weights=weights, k=1)[0]
 
     if attack_name == "identity":
         augmented = audio
-        vad_labels = torch.ones(B, n_frames, device=audio.device)
     elif attack_name == "vc_masking":
-        # Randomly compress with Encodec first, then mask
         bw = random.choice([3.0, 6.0, 12.0])
         comp = EncodecAttack.compress(audio, bw, sample_rate)
         augmented, vad_labels = apply_masking(comp, orig_audio)
+    elif attack_name == "gaussian_noise":
+        augmented = AudioEffects.random_noise(audio, 0.001)
+    elif attack_name == "pink_noise":
+        augmented = AudioEffects.pink_noise(audio, 0.01)
+    elif attack_name == "lowpass":
+        augmented = AudioEffects.lowpass_filter(audio, 5000, sample_rate)
+    elif attack_name == "highpass":
+        augmented = AudioEffects.highpass_filter(audio, 500, sample_rate)
+    elif attack_name == "bandpass":
+        augmented = AudioEffects.bandpass_filter(audio, 300, 8000, sample_rate)
+    elif attack_name == "echo":
+        augmented = AudioEffects.echo(audio, 0.3, 0.2, sample_rate)
+    elif attack_name == "smooth":
+        augmented = AudioEffects.smooth(audio, 5)
+    elif attack_name == "resample":
+        augmented = AudioEffects.updownresample(audio, sample_rate, 32000)
+    elif attack_name == "volume_boost":
+        augmented = AudioEffects.boost_audio(audio, 10)
+    elif attack_name == "volume_duck":
+        augmented = AudioEffects.duck_audio(audio, 10)
+    elif attack_name == "speed":
+        factor = random.choice([0.9, 1.1])
+        augmented = AudioEffects.speed(audio, factor, sample_rate)
     elif attack_name == "encodec_3kbps":
         augmented = EncodecAttack.compress(audio, 3.0, sample_rate)
-        vad_labels = torch.ones(B, n_frames, device=audio.device)
     elif attack_name == "encodec_6kbps":
         augmented = EncodecAttack.compress(audio, 6.0, sample_rate)
-        vad_labels = torch.ones(B, n_frames, device=audio.device)
     elif attack_name == "encodec_12kbps":
         augmented = EncodecAttack.compress(audio, 12.0, sample_rate)
-        vad_labels = torch.ones(B, n_frames, device=audio.device)
+    else:
+        augmented = audio
 
     augmented = _match_audio_length(augmented, T)
     return torch.clamp(augmented, -1.0, 1.0), vad_labels, attack_name
 
 
 # -----------------------------------------------------------------------------
-# 6. Validation Suite (Clean, Encodec 3/6/12k, DAC 6/8/24k, SNAC 0.98/1.9/2.6k)
+# 5. Full Validation Attack Suite (DSP + Neural Codecs)
 # -----------------------------------------------------------------------------
-def get_validation_attack_suite(sample_rate: int = 16000) -> List[Tuple[str, str, Callable[[torch.Tensor], torch.Tensor]]]:
-    """Returns the ordered validation attacks list: (Family, Bitrate, fn)"""
+def get_validation_attack_suite(sample_rate: int = 16000) -> List[Tuple[str, str, str, Callable[[torch.Tensor], torch.Tensor]]]:
     return [
-        ("Clean", "Identity", lambda wav: wav),
-        ("Encodec", "3 kbps", lambda wav: EncodecAttack.compress(wav, 3.0, sample_rate)),
-        ("Encodec", "6 kbps", lambda wav: EncodecAttack.compress(wav, 6.0, sample_rate)),
-        ("Encodec", "12 kbps", lambda wav: EncodecAttack.compress(wav, 12.0, sample_rate)),
-        ("DAC", "6 kbps", lambda wav: DACAttack.compress(wav, "16khz", sample_rate)),
-        ("DAC", "8 kbps", lambda wav: DACAttack.compress(wav, "44khz", sample_rate)),
-        ("DAC", "24 kbps", lambda wav: DACAttack.compress(wav, "24khz", sample_rate)),
-        ("SNAC", "0.98 kbps", lambda wav: SNACAttack.compress(wav, "24khz", sample_rate)),
-        ("SNAC", "1.9 kbps", lambda wav: SNACAttack.compress(wav, "32khz", sample_rate)),
-        ("SNAC", "2.6 kbps", lambda wav: SNACAttack.compress(wav, "44khz", sample_rate)),
+        # DSP Attacks
+        ("DSP", "Clean (Identity)", "", lambda wav: AudioEffects.identity(wav)),
+        ("DSP", "Gaussian Noise", "", lambda wav: AudioEffects.random_noise(wav, 0.001)),
+        ("DSP", "Pink Noise", "", lambda wav: AudioEffects.pink_noise(wav, 0.01)),
+        ("DSP", "Lowpass Filter (5k)", "", lambda wav: AudioEffects.lowpass_filter(wav, 5000, sample_rate)),
+        ("DSP", "Highpass Filter (500)", "", lambda wav: AudioEffects.highpass_filter(wav, 500, sample_rate)),
+        ("DSP", "Bandpass Filter", "", lambda wav: AudioEffects.bandpass_filter(wav, 300, 8000, sample_rate)),
+        ("DSP", "Echo/Reverb", "", lambda wav: AudioEffects.echo(wav, 0.3, 0.2, sample_rate)),
+        ("DSP", "Smooth (Moving Avg)", "", lambda wav: AudioEffects.smooth(wav, 5)),
+        ("DSP", "Resampling (32k-16k)", "", lambda wav: AudioEffects.updownresample(wav, sample_rate, 32000)),
+        ("DSP", "Volume Boost (+10%)", "", lambda wav: AudioEffects.boost_audio(wav, 10)),
+        ("DSP", "Volume Duck (-10%)", "", lambda wav: AudioEffects.duck_audio(wav, 10)),
+        ("DSP", "Speed (0.8x-1.2x)", "", lambda wav: AudioEffects.speed(wav, 1.1, sample_rate)),
+
+        # Codec Attacks
+        ("Codec", "Encodec", "3 kbps", lambda wav: EncodecAttack.compress(wav, 3.0, sample_rate)),
+        ("Codec", "Encodec", "6 kbps", lambda wav: EncodecAttack.compress(wav, 6.0, sample_rate)),
+        ("Codec", "Encodec", "12 kbps", lambda wav: EncodecAttack.compress(wav, 12.0, sample_rate)),
+        ("Codec", "DAC", "6 kbps", lambda wav: DACAttack.compress(wav, "16khz", sample_rate)),
+        ("Codec", "DAC", "8 kbps", lambda wav: DACAttack.compress(wav, "44khz", sample_rate)),
+        ("Codec", "DAC", "24 kbps", lambda wav: DACAttack.compress(wav, "24khz", sample_rate)),
+        ("Codec", "SNAC", "0.98 kbps", lambda wav: SNACAttack.compress(wav, "24khz", sample_rate)),
+        ("Codec", "SNAC", "1.9 kbps", lambda wav: SNACAttack.compress(wav, "32khz", sample_rate)),
+        ("Codec", "SNAC", "2.6 kbps", lambda wav: SNACAttack.compress(wav, "44khz", sample_rate)),
     ]
 
 
-def format_codec_eval_table(step: int, results: Dict[str, Dict[str, float]]) -> str:
-    """Renders a beautiful ASCII table matching VALL-E eval style."""
-    header = f"| {'Codec Family':<14} | {'Bitrate':<12} | {'Bit Acc (%)':<13} | {'BER (%)':<11} | {'Detect ACC (%)':<14} |"
-    sep = f"|{'-'*16}|{'-'*14}|{'-'*15}|{'-'*13}|{'-'*16}|"
+def format_full_validation_table(step: int, results: Dict[str, Dict[str, float]], quality_metrics: Optional[Dict[str, float]] = None) -> str:
     lines = [
-        "=" * len(header),
-        f"  TTS-Native Watermark Validation Report (Step: {step:07d})",
-        "=" * len(header),
-        header,
-        sep,
+        "=" * 80,
+        f"  NeuMark Validation Report (Step: {step:07d})",
+        "=" * 80,
+        f"{'Attack Type':<40} | {'Detect ACC':<12} | {'WM Bit Acc':<12}",
+        "-" * 80,
     ]
-    for key, stats in results.items():
-        family, bitrate = key.split("::")
-        bit_acc = stats["bit_acc"]
-        ber = stats["ber"]
-        det_acc = stats["detect_acc"]
-        lines.append(f"| {family:<14} | {bitrate:<12} | {bit_acc:>10.2f} %  | {ber:>8.2f} %  | {det_acc:>11.2f} %   |")
-    lines.append("=" * len(header))
+
+    dsp_accs, dsp_bits = [], []
+    codec_accs, codec_bits = [], []
+
+    # 1. Print DSP Section
+    for name, stats in results.items():
+        if stats["category"] == "DSP":
+            det_acc = stats["detect_acc"]
+            bit_acc = stats["bit_acc"]
+            dsp_accs.append(det_acc)
+            dsp_bits.append(bit_acc)
+            lines.append(f"{name:<40} | {det_acc:<12.4f} | {bit_acc:<12.4f}")
+
+    if dsp_accs:
+        avg_dsp_det = sum(dsp_accs) / len(dsp_accs)
+        avg_dsp_bit = sum(dsp_bits) / len(dsp_bits)
+        lines.append(f"{'DSP Avg.':<40} | {avg_dsp_det:<12.4f} | {avg_dsp_bit:<12.4f}")
+        lines.append("-" * 80)
+
+    # 2. Print Codec Section (Grouped by Family)
+    codec_families = ["Encodec", "DAC", "SNAC"]
+    for family in codec_families:
+        first = True
+        for name, stats in results.items():
+            if stats["category"] == "Codec" and stats["family"] == family:
+                det_acc = stats["detect_acc"]
+                bit_acc = stats["bit_acc"]
+                codec_accs.append(det_acc)
+                codec_bits.append(bit_acc)
+                bitrate = stats["bitrate"]
+                if first:
+                    label = f"{family:<16} {bitrate}"
+                    first = False
+                else:
+                    label = f"{'':<16} {bitrate}"
+                lines.append(f"{label:<40} | {det_acc:<12.4f} | {bit_acc:<12.4f}")
+        lines.append("")
+
+    if lines[-1] == "":
+        lines.pop()
+
+    if codec_accs:
+        avg_codec_det = sum(codec_accs) / len(codec_accs)
+        avg_codec_bit = sum(codec_bits) / len(codec_bits)
+        lines.append(f"{'Codec Avg.':<40} | {avg_codec_det:<12.4f} | {avg_codec_bit:<12.4f}")
+        lines.append("-" * 80)
+
+    all_accs = dsp_accs + codec_accs
+    all_bits = dsp_bits + codec_bits
+    if all_accs:
+        total_avg_det = sum(all_accs) / len(all_accs)
+        total_avg_bit = sum(all_bits) / len(all_bits)
+        lines.append(f"{'Avg.':<40} | {total_avg_det:<12.4f} | {total_avg_bit:<12.4f}")
+
+    if quality_metrics:
+        lines.append("=" * 80)
+        lines.append("  Speech Quality & Fidelity Degradation (Clean TTS vs. NeuMark Watermarked):")
+        lines.append("-" * 80)
+        lines.append(f"{'Metric':<25} | {'Clean TTS':<12} | {'Watermarked':<12} | {'Delta (WM - Clean)':<18}")
+        lines.append("-" * 80)
+
+        # UTMOS
+        c_ut = quality_metrics.get("clean_utmos", 0.0)
+        w_ut = quality_metrics.get("wm_utmos", 0.0)
+        d_ut = w_ut - c_ut
+        lines.append(f"{'UTMOS (MOS 1.0 - 5.0)':<25} | {c_ut:<12.4f} | {w_ut:<12.4f} | {d_ut:+12.4f}")
+
+        # SIM
+        c_sim = quality_metrics.get("clean_sim", 0.0)
+        w_sim = quality_metrics.get("wm_sim", 0.0)
+        d_sim = w_sim - c_sim
+        lines.append(f"{'SIM (Speaker Cosine Sim)':<25} | {c_sim:<12.4f} | {w_sim:<12.4f} | {d_sim:+12.4f}")
+
+        # WER
+        c_wer = quality_metrics.get("clean_wer", 0.0)
+        w_wer = quality_metrics.get("wm_wer", 0.0)
+        d_wer = w_wer - c_wer
+        lines.append(f"{'ASR WER (Word Error Rate)':<25} | {c_wer:<12.4f} | {w_wer:<12.4f} | {d_wer:+12.4f}")
+
+        # CER
+        c_cer = quality_metrics.get("clean_cer", 0.0)
+        w_cer = quality_metrics.get("wm_cer", 0.0)
+        d_cer = w_cer - c_cer
+        lines.append(f"{'ASR CER (Char Error Rate)':<25} | {c_cer:<12.4f} | {w_cer:<12.4f} | {d_cer:+12.4f}")
+
+    lines.append("=" * 80)
     return "\n".join(lines)

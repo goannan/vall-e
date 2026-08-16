@@ -88,13 +88,29 @@ class UTMOSLoss(nn.Module):
 # 2. Speaker Similarity Loss (WavLM-Large SV)
 # ==========================================
 class SpeakerSimLoss(nn.Module):
+    def get_similarity(self, wm_audio: torch.Tensor, prompt_audio: torch.Tensor, sample_rate: int = 16000) -> float:
+        if not self.available or self.model is None:
+            return 0.0
+        if wm_audio.ndim == 3:
+            wm_audio = wm_audio.squeeze(1)
+        if prompt_audio.ndim == 3:
+            prompt_audio = prompt_audio.squeeze(1)
+        if sample_rate != 16000:
+            wm_audio = torchaudio.functional.resample(wm_audio, sample_rate, 16000)
+            prompt_audio = torchaudio.functional.resample(prompt_audio, sample_rate, 16000)
+        with torch.no_grad():
+            emb_wm = self.model(wm_audio)
+            emb_prompt = self.model(prompt_audio)
+            sim = F.cosine_similarity(emb_wm, emb_prompt, dim=-1).mean().item()
+        return sim
+
     """Calculates cosine similarity loss against target speaker prompt embedding."""
 
     def __init__(self, checkpoint_path: Optional[str] = None, device: str = "cuda"):
         super().__init__()
         self.device = torch.device(device)
-        if checkpoint_path is None:
-            checkpoint_path = str(SCRIPT_DIR / "models/wavlm_large_finetune.pth")
+        if checkpoint_path is None or not os.path.isabs(checkpoint_path):
+            checkpoint_path = str(SCRIPT_DIR / (checkpoint_path or "models/wavlm_large_finetune.pth"))
 
         self.available = False
         if os.path.exists(checkpoint_path):
@@ -149,6 +165,28 @@ class SpeakerSimLoss(nn.Module):
 # 3. ASR CTC Loss (Wav2Vec2 Pronunciation)
 # ==========================================
 class ASRLoss(nn.Module):
+    def decode_greedy(self, audio: torch.Tensor, sample_rate: int = 16000) -> List[str]:
+        if audio.ndim == 3:
+            audio = audio.squeeze(1)
+        if sample_rate != 16000:
+            audio = torchaudio.functional.resample(audio, sample_rate, 16000)
+        with torch.no_grad():
+            emissions, _ = self.model(audio)
+            indices = torch.argmax(emissions, dim=-1)
+        
+        transcripts = []
+        for seq in indices:
+            collapsed = []
+            prev = None
+            for idx in seq.tolist():
+                if idx != prev:
+                    if idx != self.blank_id:
+                        collapsed.append(self.labels[idx])
+                prev = idx
+            text = "".join(collapsed).replace("|", " ").strip()
+            transcripts.append(text)
+        return transcripts
+
     """Calculates CTC Loss against ground truth text tokens using Wav2Vec2 ASR."""
 
     def __init__(self, bundle_name: str = "WAV2VEC2_ASR_BASE_960H", device: str = "cuda"):

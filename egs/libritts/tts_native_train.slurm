@@ -33,6 +33,7 @@ if [ "${PYENV_VERSION}" != "none" ]; then
 fi
 
 export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=4
 
