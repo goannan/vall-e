@@ -124,9 +124,12 @@ class TTSNativeTrainer:
         st_cfg = str(NEUMARK_ROOT / cfg.get("neumark_config", "STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json"))
         st_ckpt = str(NEUMARK_ROOT / cfg.get("neumark_st_checkpoint", "STmodels/pretrained_model/SpeechTokenizer.pt"))
         self.generator = SpeechTokenizer.load_from_checkpoint(st_cfg, st_ckpt).to(self.device)
-        self.generator.eval()
+        self.generator.train()  # CuDNN RNN backward requires train mode even when frozen
         for p in self.generator.parameters():
             p.requires_grad = False
+        for m in self.generator.modules():
+            if isinstance(m, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.LayerNorm)):
+                m.eval()
 
         print("[Init] Creating Watermark Embedder & Detector...")
         self.msg_processor = WMEmbedder(nbits=16, input_dim=1024, nchunk_size=4).to(self.device)
@@ -323,7 +326,10 @@ class TTSNativeTrainer:
 
     def train(self):
         print(f"[Training] Starting TTS-Native Watermark Training for {self.epochs} epochs...")
-        self.generator.eval()
+        self.generator.train()  # CuDNN RNN backward requires train mode
+        for m in self.generator.modules():
+            if isinstance(m, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.LayerNorm)):
+                m.eval()
         self.msg_processor.train()
         self.detector.train()
         for d in self.discriminators.values():
@@ -521,6 +527,10 @@ class TTSNativeTrainer:
                 # Validation Loop
                 if steps > 0 and steps % self.val_steps == 0:
                     self.validate(steps)
+                    self.generator.train()
+                    for m in self.generator.modules():
+                        if isinstance(m, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.LayerNorm)):
+                            m.eval()
                     self.msg_processor.train()
                     self.detector.train()
                     for d in self.discriminators.values():
