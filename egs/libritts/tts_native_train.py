@@ -257,9 +257,10 @@ class TTSNativeTrainer:
                 self.optim_generator.zero_grad()
                 unwrapped_gen = self.accelerator.unwrap_model(self.generator)
 
-                # Recover 8 continuous latent layers from RVQ Codebook
+                # Permute codes to [8, B, T] layout for SpeechTokenizer RVQ decode
+                codes_qbt = codes.permute(1, 0, 2).contiguous() if codes.shape[1] == 8 else codes
                 quantized_layers = [
-                    unwrapped_gen.quantizer.decode(codes[:, k : k + 1], st=k)
+                    unwrapped_gen.quantizer.decode(codes_qbt[k : k + 1], st=k)
                     for k in range(8)
                 ]  # list of 8 tensors [B, 1024, T]
                 z_q = sum(quantized_layers)
