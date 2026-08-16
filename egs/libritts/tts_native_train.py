@@ -82,6 +82,7 @@ class TTSNativeTrainer:
         self.num_warmup_steps = cfg.get("num_warmup_steps", 1000)
         self.val_steps = cfg.get("val_steps", 1000)
         self.num_val_samples = cfg.get("num_val_samples", 50)
+        self.grad_accum_steps = max(1, cfg.get("gradient_accumulation_steps", 1))
         self.seed = cfg.get("seed", 1234)
 
         # Loss weights
@@ -343,7 +344,11 @@ class TTSNativeTrainer:
                 # -------------------------------------------------------------
                 # 1. Decode Pre-computed Codes to Continuous Latents & Embed
                 # -------------------------------------------------------------
-                self.optim_generator.zero_grad()
+                if i % self.grad_accum_steps == 0:
+                    self.optim_generator.zero_grad()
+                    if self.adv_loss_lambda > 0:
+                        self.optim_discriminators.zero_grad()
+
                 unwrapped_gen = self.accelerator.unwrap_model(self.generator)
 
                 # Permute codes to [8, B, T] layout for SpeechTokenizer RVQ decode
@@ -443,20 +448,17 @@ class TTSNativeTrainer:
                     + loss_asr
                 )
 
-                self.accelerator.backward(total_loss)
-
-                if self.adv_loss_lambda > 0:
-                    for discriminator in self.discriminators.values():
-                        discriminator.requires_grad_(True)
-
-                self.optim_generator.step()
+                # Normalize loss for gradient accumulation
+                self.accelerator.backward(total_loss / self.grad_accum_steps)
 
                 # -------------------------------------------------------------
                 # 4. Train Discriminators
                 # -------------------------------------------------------------
                 loss_D = torch.zeros((), device=self.device)
                 if self.adv_loss_lambda > 0:
-                    self.optim_discriminators.zero_grad()
+                    for discriminator in self.discriminators.values():
+                        discriminator.requires_grad_(True)
+
                     for name, discriminator in self.discriminators.items():
                         real_preds, fake_preds, _, _ = discriminator(
                             real_audio_aligned, wm_audio_aligned.detach()
@@ -465,21 +467,25 @@ class TTSNativeTrainer:
                         discriminator_components[name] = comp
 
                     loss_D = torch.stack(list(discriminator_components.values())).mean()
-                    self.accelerator.backward(loss_D)
-                    self.optim_discriminators.step()
+                    self.accelerator.backward(loss_D / self.grad_accum_steps)
 
-                # -------------------------------------------------------------
-                # 5. Learning Rate & Logging
-                # -------------------------------------------------------------
-                if steps < self.num_warmup_steps:
-                    lr = self.warmup(steps)
-                    for pg in self.optim_generator.param_groups:
-                        pg["lr"] = lr
-                    for pg in self.optim_discriminators.param_groups:
-                        pg["lr"] = lr
-                else:
-                    self.scheduler_generator.step()
-                    self.scheduler_discriminator.step()
+                # Optimizer step on accumulation boundary
+                if (i + 1) % self.grad_accum_steps == 0 or (i + 1) == len(self.dl):
+                    self.optim_generator.step()
+                    self.optim_generator.zero_grad()
+                    if self.adv_loss_lambda > 0:
+                        self.optim_discriminators.step()
+                        self.optim_discriminators.zero_grad()
+
+                    if steps < self.num_warmup_steps:
+                        lr = self.warmup(steps)
+                        for pg in self.optim_generator.param_groups:
+                            pg["lr"] = lr
+                        for pg in self.optim_discriminators.param_groups:
+                            pg["lr"] = lr
+                    else:
+                        self.scheduler_generator.step()
+                        self.scheduler_discriminator.step()
 
                 # GPU Memory Tracking & Output
                 vram_info = {}
