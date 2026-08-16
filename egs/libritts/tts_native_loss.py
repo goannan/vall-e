@@ -99,24 +99,20 @@ class SpeakerSimLoss(nn.Module):
         self.available = False
         if os.path.exists(checkpoint_path):
             try:
-                sv_dir = str(SCRIPT_DIR / "tools/seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification")
-                # Temporarily add sv_dir to sys.path and remove after import
-                orig_sys_path = list(sys.path)
-                if sv_dir not in sys.path:
-                    sys.path.insert(0, sv_dir)
+                import importlib.util
+                ecapa_file = SCRIPT_DIR / "tools/seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/models/ecapa_tdnn.py"
+                spec = importlib.util.spec_from_file_location("ecapa_tdnn_standalone", str(ecapa_file))
+                ecapa_mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(ecapa_mod)
+                ECAPA_TDNN_SMALL = ecapa_mod.ECAPA_TDNN_SMALL
 
-                from verification import init_model
-                self.model = init_model("wavlm_large", checkpoint=checkpoint_path)
+                self.model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type="wavlm_large")
+                state_dict = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
+                self.model.load_state_dict(state_dict["model"], strict=False)
                 self.model.eval()
                 self.model.requires_grad_(False)
                 self.model.to(self.device)
                 self.available = True
-
-                # Restore sys.path so speaker_verification/models/ does not shadow NeuMark/models.py
-                sys.path = orig_sys_path
-                # Clean up shadowed 'models' module from sys.modules if needed
-                if "models" in sys.modules and hasattr(sys.modules["models"], "__file__") and "speaker_verification" in sys.modules["models"].__file__:
-                    del sys.modules["models"]
             except Exception as e:
                 print(f"[Warning] Failed to initialize WavLM SV model: {e}. SpeakerSimLoss will fall back.")
                 self.available = False
