@@ -40,6 +40,7 @@ import json
 from pathlib import Path
 # TraceableSpeech project lives at vall-e/traceableSpeech; imports are lowercase on disk.
 from traceableSpeech.env import AttrDict
+from traceableSpeech.meldataset import mel_spectrogram
 from traceableSpeech.models import Generator, Encoder, Quantizer
 from traceableSpeech.watermark import Watermark_Encoder, Watermark_Decoder, Random_watermark
 
@@ -230,7 +231,8 @@ def load_checkpoint(filepath, device):
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_VOICEMARK_ROOT = PROJECT_ROOT.parent / "VoiceMark"
+DEFAULT_NEUMARK_ROOT = PROJECT_ROOT.parent / "NeuMark"
+DEFAULT_VOICEMARK_ROOT = PROJECT_ROOT.parent / "NeuMark"
 
 
 def str_to_bool(value: Union[str, bool, None], default: bool = False) -> bool:
@@ -345,6 +347,11 @@ class AudioTokenizer:
         voicemark_st_checkpoint: Optional[str] = None,
         voicemark_checkpoint: Optional[str] = None,
         voicemark_embed_vq1: Union[str, bool, None] = None,
+        neumark_root: Optional[str] = None,
+        neumark_config: Optional[str] = None,
+        neumark_st_checkpoint: Optional[str] = None,
+        neumark_checkpoint: Optional[str] = None,
+        neumark_embed_vq1: Union[str, bool, None] = None,
     ) -> None:
         if not device:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -355,9 +362,9 @@ class AudioTokenizer:
             backend = "traceablespeech"
         if backend in {"ts", "traceable_speech"}:
             backend = "traceablespeech"
-        if backend in {"vm", "voice_mark"}:
-            backend = "voicemark"
-        if backend not in {"encodec", "traceablespeech", "voicemark"}:
+        if backend in {"nm", "neu_mark", "neumark", "vm", "voice_mark", "voicemark"}:
+            backend = "neumark"
+        if backend not in {"encodec", "traceablespeech", "voicemark", "neumark"}:
             raise ValueError(f"Unsupported watermark backend: {watermark_backend}")
         self.watermark_backend = backend
 
@@ -367,7 +374,7 @@ class AudioTokenizer:
         self.downsample_rate = 320
         self.num_quantizers = 8
 
-        if self.watermark_backend != "voicemark":
+        if self.watermark_backend not in {"voicemark", "neumark"}:
             model = EncodecModel.encodec_model_24khz()
             model.set_target_bandwidth(6.0)
             remove_encodec_weight_norm(model)
@@ -409,7 +416,7 @@ class AudioTokenizer:
             Path(self._vm_root) / "train" / "Log" / "spt_base" / "20260601-123358" / "WatermarkTrainer_final_00150000.pt",
             root=self._vm_root,
         )
-        self._vm_embed_vq1 = str_to_bool(voicemark_embed_vq1, default=True)
+        self._vm_embed_vq1 = str_to_bool(neumark_embed_vq1 if neumark_embed_vq1 is not None else voicemark_embed_vq1, default=True)
         self._vm_loaded = False
         self._vm_available = False
         self._vm_st_model = None
@@ -418,7 +425,7 @@ class AudioTokenizer:
         self.nbits = 16
         self.nchunk_size = 4
 
-        if self.watermark_backend == "voicemark" and os.path.isfile(self._vm_config_path):
+        if self.watermark_backend in {"voicemark", "neumark"} and os.path.isfile(self._vm_config_path):
             with open(self._vm_config_path) as f:
                 vm_cfg = json.load(f)
             self.sample_rate = int(vm_cfg.get("sample_rate", 16000))
@@ -436,7 +443,7 @@ class AudioTokenizer:
 
     @property
     def has_watermark_decoder(self) -> bool:
-        if self.watermark_backend == "voicemark":
+        if self.watermark_backend in {"voicemark", "neumark"}:
             return self._load_voicemark()
         if self.watermark_backend == "traceablespeech":
             return self._load_traceable_speech()
@@ -494,7 +501,7 @@ class AudioTokenizer:
             return self._vm_available
 
         self._vm_loaded = True
-        if self.watermark_backend != "voicemark":
+        if self.watermark_backend not in {"voicemark", "neumark"}:
             return False
         if not os.path.isfile(self._vm_config_path):
             raise FileNotFoundError(f"VoiceMark config not found: {self._vm_config_path}")
@@ -567,7 +574,7 @@ class AudioTokenizer:
     def encode(self, wav: torch.Tensor) -> torch.Tensor:
         # input: wav: [B, C = 1, T]
         # output: List[(codes, scale)] with codes [B, n_q = 8, T/downsample_rate]
-        if self.watermark_backend == "voicemark":
+        if self.watermark_backend in {"voicemark", "neumark"}:
             if not self._load_voicemark():
                 raise RuntimeError("VoiceMark backend is not available.")
             with torch.no_grad():
@@ -590,7 +597,7 @@ class AudioTokenizer:
         self, frames: torch.Tensor, watermark_sign: torch.Tensor = None
     ) -> torch.Tensor:
         # frames: List[(codes, scale)] with codes [B, n_q, T]
-        if self.watermark_backend == "voicemark":
+        if self.watermark_backend in {"voicemark", "neumark"}:
             return self._decode_voicemark(self._extract_codes(frames), watermark_sign)
 
         if not self._load_traceable_speech():
@@ -611,7 +618,7 @@ class AudioTokenizer:
         self, frames: torch.Tensor, watermark_sign: torch.Tensor = None
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Decode both reference and optional watermarked audio."""
-        if self.watermark_backend == "voicemark":
+        if self.watermark_backend in {"voicemark", "neumark"}:
             codes = self._extract_codes(frames)
             decoded_ref = self._decode_voicemark(codes, None)
             decoded_wm = None
@@ -641,18 +648,45 @@ class AudioTokenizer:
         return decoded_ref, decoded_wm
 
     def random_watermark(self, batch_size: int) -> Optional[torch.Tensor]:
-        if self.watermark_backend == "voicemark" and self._load_voicemark():
+        if self.watermark_backend in {"voicemark", "neumark"} and self._load_voicemark():
             return torch.randint(0, 2, (batch_size, self.nbits), device=self.device)
         if self.watermark_backend == "traceablespeech" and self._load_traceable_speech():
             return Random_watermark(batch_size).to(self.device)
         return None
 
     def detect_watermark(self, wav: torch.Tensor):
-        if self.watermark_backend != "voicemark" or not self._load_voicemark():
-            return None
-        wav = wav.to(self.device)
-        features = self._vm_st_model.forward_feature(wav, embed_vq1=self._vm_embed_vq1)
-        return self._vm_detector.detect_watermark(features)
+        if self.watermark_backend in {"voicemark", "neumark"} and self._load_voicemark():
+            wav = wav.to(self.device)
+            features = self._vm_st_model.forward_feature(wav, embed_vq1=self._vm_embed_vq1)
+            return self._vm_detector.detect_watermark(features)
+
+        if self.watermark_backend == "traceablespeech" and self._load_traceable_speech():
+            wav = wav.to(self.device)
+            if wav.dim() == 3:
+                wav_for_mel = wav.squeeze(1)
+            else:
+                wav_for_mel = wav
+            pad_need = int((self._h.n_fft - self._h.hop_size) / 2)
+            if wav_for_mel.shape[-1] <= pad_need:
+                return None
+            mel = mel_spectrogram(
+                wav_for_mel,
+                self._h.n_fft,
+                self._h.num_mels,
+                self._h.sampling_rate,
+                self._h.hop_size,
+                self._h.win_size,
+                self._h.fmin,
+                self._h.fmax_for_loss,
+            )
+            sign_score, sign_pred = self._watermark_decoder(mel)
+            detect_prob = torch.stack(
+                [score.softmax(dim=1).max(dim=1).values for score in sign_score],
+                dim=1,
+            ).mean(dim=1)
+            return detect_prob, sign_pred, sign_score
+
+        return None
 
 
 def tokenize_audio(tokenizer: AudioTokenizer, audio_path: str):

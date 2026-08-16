@@ -125,13 +125,13 @@ def get_args():
         "--watermark-backend",
         type=str,
         default="encodec",
-        choices=["encodec", "traceablespeech", "voicemark"],
+        choices=["encodec", "traceablespeech", "voicemark", "neumark"],
         help="Codec/watermark backend used by AudioTokenizer.",
     )
     parser.add_argument(
         "--voicemark-root",
         type=str,
-        default="/home/wu25/mrnas04home/projects/VoiceMark",
+        default="/home/wu25/mrnas04home/projects/NeuMark",
         help="Path to the VoiceMark project root.",
     )
     parser.add_argument(

@@ -1,0 +1,6 @@
+# Optional dependencies for the neural-codec attacks in valle/bin/infer.py.
+# EnCodec is also present in the main requirements file; it is repeated here
+# so this file is sufficient for preparing an evaluation environment.
+encodec==0.1.1
+descript-audio-codec==1.0.0
+snac==1.2.1

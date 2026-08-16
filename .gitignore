@@ -16,3 +16,7 @@ examples/libritts/logs/
 traceableSpeech/
 egs/libritts/download/
 egs/libritts/logs/
+*.pth
+*.out
+egs/*/models/
+egs/*/logs/

@@ -1,0 +1,32 @@
+{
+    "train_manifest": "data/tokenized_voicemark/cuts_train.jsonl.gz",
+    "valid_manifest": "data/tokenized_voicemark/cuts_dev.jsonl.gz",
+    "results_folder": "exp/tts_native_neumark",
+    "wavlm_checkpoint": "models/wavlm_large_finetune.pth",
+    "sample_rate": 16000,
+    "batch_size": 8,
+    "epochs": 50,
+    "learning_rate": 5e-05,
+    "initial_learning_rate": 1e-06,
+    "num_warmup_steps": 1000,
+    "betas": [
+        0.9,
+        0.99
+    ],
+    "wd": 0.0,
+    "seed": 1234,
+    "num_workers": 4,
+    "cos_loss_lambda": 2.0,
+    "adv_loss_lambda": 1.0,
+    "dec_loss_lambda": 10.0,
+    "vad_loss_lambda": 1.0,
+    "utmos_loss_lambda": 0.5,
+    "sim_loss_lambda": 1.0,
+    "asr_loss_lambda": 0.5,
+    "log_steps": 50,
+    "save_steps": 5000,
+    "val_steps": 5000,
+    "neumark_root": "/home/wu25/mrnas04home/projects/NeuMark",
+    "neumark_config": "STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json",
+    "neumark_st_checkpoint": "STmodels/pretrained_model/SpeechTokenizer.pt"
+}

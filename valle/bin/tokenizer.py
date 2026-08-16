@@ -78,12 +78,12 @@ def get_args():
         "--audio-extractor",
         type=str,
         default="Encodec",
-        help="Encodec, VoiceMark, or Fbank",
+        help="Encodec, NeuMark, VoiceMark, or Fbank",
     )
     parser.add_argument(
         "--voicemark-root",
         type=str,
-        default="/home/wu25/mrnas04home/projects/VoiceMark",
+        default="/home/wu25/mrnas04home/projects/NeuMark",
         help="Path to the VoiceMark project root.",
     )
     parser.add_argument(
@@ -180,7 +180,7 @@ def main():
     audio_extractor = None
     audio_extractor_name = args.audio_extractor.lower() if args.audio_extractor else ""
     if args.audio_extractor:
-        if audio_extractor_name in {"encodec", "voicemark"}:
+        if audio_extractor_name in {"encodec", "voicemark", "neumark"}:
             audio_extractor = AudioTokenExtractor(
                 AudioTokenConfig(
                     backend=audio_extractor_name,
@@ -218,7 +218,7 @@ def main():
 
             # AudioTokenizer
             if args.audio_extractor:
-                if audio_extractor_name in {"encodec", "voicemark"}:
+                if audio_extractor_name in {"encodec", "voicemark", "neumark"}:
                     storage_path = (
                         f"{args.output_dir}/{args.prefix}_{audio_extractor_name}_{partition}"
                     )
@@ -241,7 +241,7 @@ def main():
                 with torch.no_grad():
                     if (
                         torch.cuda.is_available()
-                        and audio_extractor_name in {"encodec", "voicemark"}
+                        and audio_extractor_name in {"encodec", "voicemark", "neumark"}
                     ):
                         cut_set = cut_set.compute_and_store_features_batch(
                             extractor=audio_extractor,

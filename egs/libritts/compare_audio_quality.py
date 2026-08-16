@@ -52,12 +52,32 @@ def compute_metrics(ref_path: Path, deg_path: Path, target_sr: int = 16000):
     except Exception:
         stoi_score = None
 
+    # Scale-invariant signal-to-noise ratio.  Keep this implementation here so
+    # batch and one-off quality evaluation use exactly the same alignment and
+    # resampling policy as PESQ/STOI.
+    eps = np.finfo(np.float32).eps
+    ref_zm = ref - np.mean(ref)
+    deg_zm = deg - np.mean(deg)
+    ref_energy = float(np.sum(ref_zm**2))
+    if ref_energy <= eps:
+        si_snr = None
+    else:
+        projection = (
+            float(np.sum(deg_zm * ref_zm)) * ref_zm / (ref_energy + eps)
+        )
+        noise = deg_zm - projection
+        si_snr = 10.0 * np.log10(
+            (float(np.sum(projection**2)) + eps)
+            / (float(np.sum(noise**2)) + eps)
+        )
+
     visqol_moslqo = run_visqol_cli(ref_path, deg_path, sr_ref)
 
     return {
         "sr": sr_ref,
         "pesq_wb": float(pesq_wb) if pesq_wb is not None else None,
         "stoi": float(stoi_score) if stoi_score is not None else None,
+        "si_snr_db": float(si_snr) if si_snr is not None else None,
         "duration_s": min_len / sr_ref,
         "visqol_moslqo": float(visqol_moslqo) if visqol_moslqo is not None else None,
     }
@@ -114,6 +134,8 @@ def main():
         print(f"Aligned duration : {metrics['duration_s']:.2f} s")
         print(f"PESQ (wideband)  : {metrics['pesq_wb']:.3f}")
         print(f"STOI             : {metrics['stoi']:.3f}")
+        if metrics["si_snr_db"] is not None:
+            print(f"SI-SNR           : {metrics['si_snr_db']:.3f} dB")
         print()
 
 

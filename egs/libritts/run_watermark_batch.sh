@@ -1,17 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
-# Number of samples to generate. Override by setting N_SAMPLES env var.
-N_SAMPLES=${N_SAMPLES:-1000}
+# Seed-TTS-Eval English contains 1088 standard zero-shot TTS rows.
+N_SAMPLES=${N_SAMPLES:-1088}
 # Output directory for generated wavs (clean + watermarked)
-OUT_DIR=${OUT_DIR:-infer/wm_eval}
+OUT_DIR=${OUT_DIR:-infer/wm_eval_seedtts_en}
 
 # Model/checkpoint settings (mirrors valid.sh defaults)
-EXP_DIR=${EXP_DIR:-exp/valle}
-CHECKPOINT=${CHECKPOINT:-${EXP_DIR}/best-valid-loss.pt}
-TEXT_PROMPTS="This I read with great attention, while they sat silent."
-AUDIO_PROMPTS="./prompts/8455_210777_000067_000000.wav"
-TEXT_BASE="To get up and running quickly just follow the steps below."
+EXP_DIR=${EXP_DIR:-exp/valle_voicemark}
+CHECKPOINT=${CHECKPOINT:-${EXP_DIR}/epoch-40.pt}
+SEED_TTS_ROOT=${SEED_TTS_ROOT:-data/seed_tts_eval}
+SEED_TTS_MANIFEST=${SEED_TTS_MANIFEST:-${SEED_TTS_ROOT}/en/meta.lst}
 
 # Watermark backend settings
 WATERMARK_BACKEND=${WATERMARK_BACKEND:-voicemark}
@@ -21,22 +20,19 @@ VOICEMARK_ROOT=${VOICEMARK_ROOT:-/home/wu25/mrnas04home/projects/VoiceMark}
 VOICEMARK_CHECKPOINT=${VOICEMARK_CHECKPOINT:-train/Log/spt_base/20260601-123358/WatermarkTrainer_final_00150000.pt}
 OUTPUT_SR=${OUTPUT_SR:-16000}
 
-# Build a | separated text string with N_SAMPLES entries.
-TEXTS=$(N_SAMPLES=${N_SAMPLES} TEXT_BASE="${TEXT_BASE}" python - <<'PY'
-import os
-n = int(os.environ.get("N_SAMPLES", 1000))
-base = os.environ.get("TEXT_BASE", "Sample")
-print("|".join([f"{base} Sample {i}." for i in range(n)]))
-PY
-)
+if [[ ! -f "${SEED_TTS_MANIFEST}" ]]; then
+  python3 prepare_seed_tts_eval.py \
+    --output-dir "${SEED_TTS_ROOT}" \
+    --language en
+fi
 
-echo "Generating ${N_SAMPLES} samples to ${OUT_DIR} (clean + watermark)..."
+echo "Generating ${N_SAMPLES} Seed-TTS-Eval English samples to ${OUT_DIR}..."
 python3 bin/infer.py \
   --output-dir "${OUT_DIR}" \
   --checkpoint "${CHECKPOINT}" \
-  --text-prompts "${TEXT_PROMPTS}" \
-  --audio-prompts "${AUDIO_PROMPTS}" \
-  --text "${TEXTS}" \
+  --seed-tts-manifest "${SEED_TTS_MANIFEST}" \
+  --seed-tts-num-samples "${N_SAMPLES}" \
+  --seed-tts-primary-output watermarked \
   --watermark-backend "${WATERMARK_BACKEND}" \
   --ts-enable "${TS_ENABLE}" \
   --ts-checkpoint-file "${TS_CKPT}" \

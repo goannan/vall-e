@@ -35,7 +35,7 @@ PREPARE_STOP_STAGE=${PREPARE_STOP_STAGE:-3}
 DATASET_PARTS=${DATASET_PARTS:---dataset-parts all}
 N_JOBS=${N_JOBS:-16}
 
-export AUDIO_EXTRACTOR=${AUDIO_EXTRACTOR:-VoiceMark}
+export AUDIO_EXTRACTOR=${AUDIO_EXTRACTOR:-NeuMark}
 export AUDIO_FEATS_DIR=${AUDIO_FEATS_DIR:-data/tokenized_voicemark}
 export VOICEMARK_ROOT=${VOICEMARK_ROOT:-/home/wu25/mrnas04home/projects/VoiceMark}
 export VOICEMARK_CONFIG=${VOICEMARK_CONFIG:-STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json}
