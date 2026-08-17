@@ -2,8 +2,8 @@
 #SBATCH --job-name=tts_native_wm
 #SBATCH --nodes=1
 #SBATCH --nodelist=compute[03,07],mrcompute[02-03]
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=6
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=16
 #SBATCH -t 14-00:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
@@ -39,11 +39,15 @@ export OMP_NUM_THREADS=4
 
 CONFIG_PATH=${1:-"${WORK_DIR}/config_tts_native.json"}
 
+# Auto-detect available GPU count
+NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 1)
+
 echo "=========================================================="
-echo " Starting TTS-Native Watermark 1-GPU Training             "
+echo " Starting NeuMark Multi-GPU Training                      "
 echo " Time:            $(date)                                 "
 echo " Host:            $(hostname)                             "
 echo " WorkingDir:      ${WORK_DIR}                             "
+echo " GPU Count:       ${NUM_GPUS}                             "
 echo " CUDA Device:     ${CUDA_VISIBLE_DEVICES:-auto}           "
 echo " Config:          ${CONFIG_PATH}                          "
 echo "=========================================================="
@@ -54,7 +58,18 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   echo "----------------------------"
 fi
 
-python3 tts_native_train.py --config "${CONFIG_PATH}"
+if [ "${NUM_GPUS}" -gt 1 ]; then
+  echo "Launching Accelerate Multi-GPU (${NUM_GPUS} GPUs DDP)..."
+  accelerate launch \
+    --multi_gpu \
+    --num_processes "${NUM_GPUS}" \
+    --mixed_precision no \
+    --dynamo_backend no \
+    tts_native_train.py --config "${CONFIG_PATH}"
+else
+  echo "Launching Single-GPU Training..."
+  python3 tts_native_train.py --config "${CONFIG_PATH}"
+fi
 
 echo "=========================================================="
 echo " Training finished at $(date)                             "
