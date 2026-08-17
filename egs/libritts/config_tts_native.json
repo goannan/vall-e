@@ -30,6 +30,6 @@
     "neumark_config": "STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json",
     "neumark_st_checkpoint": "STmodels/pretrained_model/SpeechTokenizer.pt",
     "num_val_samples": 50,
-    "gradient_accumulation_steps": 4,
+    "gradient_accumulation_steps": 1,
     "max_duration": 10.5
 }
