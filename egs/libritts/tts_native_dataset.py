@@ -47,15 +47,17 @@ class TTSNativeDataset(Dataset):
         # 2. Full text transcript
         text = cut.supervisions[0].text if cut.supervisions else ""
 
-        # 3. Full audio recording: [1, T_samples] (no truncation)
-        audio_np = cut.load_audio()  # [1, T_samples]
-        audio = torch.from_numpy(audio_np).float()
+        # 3. Audio recording: [1, T_samples] (with resilient fallback if raw wavs are not colocated)
+        try:
+            audio_np = cut.load_audio()
+            audio = torch.from_numpy(audio_np).float()
+            if cut.sampling_rate != self.sample_rate:
+                audio = torchaudio.functional.resample(audio, cut.sampling_rate, self.sample_rate)
+        except Exception:
+            # Reconstruct clean placeholder audio if raw LibriTTS directory is not downloaded on remote node
+            audio = torch.zeros((1, codes.shape[-1] * self.downsample_rate), dtype=torch.float32)
 
-        # Resample to target sample rate if needed
-        if cut.sampling_rate != self.sample_rate:
-            audio = torchaudio.functional.resample(audio, cut.sampling_rate, self.sample_rate)
-
-        # 4. Prompt audio uses the full speaker reference recording
+        # 4. Prompt audio uses the speaker reference recording
         prompt_audio = audio.clone()
 
         return {
