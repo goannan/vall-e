@@ -649,7 +649,7 @@ class NeuMarkTrainer:
     def save(self, steps: int, epoch: int, final: bool = False):
         if not self.is_main:
             return
-        prefix = "TTSNative_final" if final else f"NeuMark_epoch_{epoch:03d}"
+        prefix = "NeuMark_final" if final else f"NeuMark_epoch_{epoch:03d}"
         ckpt_path = self.results_folder / f"{prefix}.pt"
         pkg = dict(
             msg_processor=self.accelerator.get_state_dict(self.msg_processor),
