@@ -26,10 +26,26 @@ PROJECT_DIR = SCRIPT_DIR.parents[1]
 sys.path.insert(0, str(PROJECT_DIR))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-# NeuMark model imports
-NEUMARK_ROOT = Path("/home/wu25/mrnas04home/projects/NeuMark")
-if str(NEUMARK_ROOT) not in sys.path:
-    sys.path.insert(0, str(NEUMARK_ROOT))
+# NeuMark dynamic path search & import
+def find_neumark_root() -> Path:
+    candidates = [
+        os.environ.get("NEUMARK_ROOT"),
+        PROJECT_DIR.parent / "NeuMark",
+        PROJECT_DIR / "NeuMark",
+        SCRIPT_DIR / "NeuMark",
+        SCRIPT_DIR.parents[2] / "NeuMark",
+    ]
+    for c in candidates:
+        if c and Path(c).is_dir():
+            return Path(c).resolve()
+    return (PROJECT_DIR.parent / "NeuMark").resolve()
+
+NEUMARK_ROOT = find_neumark_root()
+for p in [str(NEUMARK_ROOT), str(NEUMARK_ROOT / "train"), str(SCRIPT_DIR)]:
+    if p in sys.path:
+        sys.path.remove(p)
+    if os.path.exists(p):
+        sys.path.insert(0, p)
 
 from models import WMEmbedder, WMDetector
 from STmodels.model import SpeechTokenizer
@@ -131,8 +147,8 @@ def main():
     parser.add_argument("--sample_index", type=int, default=0, help="Index of sample cut from manifest to synthesize")
     parser.add_argument("--message", type=str, default="1011001110001101", help="16-bit binary watermark payload (e.g. 1011001110001101)")
     parser.add_argument("--output_dir", type=str, default="exp/neumark_listening_demo", help="Directory to save wavs")
-    parser.add_argument("--st_config", type=str, default="/home/wu25/mrnas04home/projects/NeuMark/STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json")
-    parser.add_argument("--st_checkpoint", type=str, default="/home/wu25/mrnas04home/projects/NeuMark/STmodels/pretrained_model/SpeechTokenizer.pt")
+    parser.add_argument("--st_config", type=str, default=str(NEUMARK_ROOT / "STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json"))
+    parser.add_argument("--st_checkpoint", type=str, default=str(NEUMARK_ROOT / "STmodels/pretrained_model/SpeechTokenizer.pt"))
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

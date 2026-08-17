@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # Ensure working directory is the submission directory
-WORK_DIR="${SLURM_SUBMIT_DIR:-/home/wu25/mrnas04home/projects/vall-e/egs/libritts}"
+WORK_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 cd "${WORK_DIR}"
 mkdir -p logs
 

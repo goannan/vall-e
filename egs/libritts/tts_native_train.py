@@ -21,11 +21,30 @@ from accelerate import (
 )
 
 # -------------------------------------------------------------
-# Path setups
+# Dynamic Path Setups
 # -------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parents[1]
-NEUMARK_ROOT = PROJECT_DIR.parent / "NeuMark"
+
+def find_neumark_root(hint: Optional[str] = None) -> Path:
+    candidates = [
+        hint,
+        os.environ.get("NEUMARK_ROOT"),
+        PROJECT_DIR.parent / "NeuMark",
+        PROJECT_DIR / "NeuMark",
+        SCRIPT_DIR / "NeuMark",
+        SCRIPT_DIR.parents[2] / "NeuMark",
+    ]
+    for c in candidates:
+        if c:
+            p = Path(c)
+            if not p.is_absolute():
+                p = (SCRIPT_DIR / p).resolve()
+            if p.is_dir():
+                return p
+    return (PROJECT_DIR.parent / "NeuMark").resolve()
+
+NEUMARK_ROOT = find_neumark_root()
 
 for p in [
     str(SCRIPT_DIR),
@@ -131,12 +150,20 @@ class NeuMarkTrainer:
                 json.dump(cfg, f, indent=4)
             self.writer = tensorboard.SummaryWriter(str(self.results_folder / "logs"))
 
+        # Resolve NeuMark root from config hint if provided
+        global NEUMARK_ROOT
+        if "neumark_root" in cfg:
+            NEUMARK_ROOT = find_neumark_root(cfg["neumark_root"])
+
         # ---------------------------------------------------------
         # Models Init
         # ---------------------------------------------------------
+        print(f"[Init] Using NeuMark Root: {NEUMARK_ROOT}")
         print("[Init] Loading SpeechTokenizer...")
-        st_cfg = str(NEUMARK_ROOT / cfg.get("neumark_config", "STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json"))
-        st_ckpt = str(NEUMARK_ROOT / cfg.get("neumark_st_checkpoint", "STmodels/pretrained_model/SpeechTokenizer.pt"))
+        st_cfg_rel = cfg.get("neumark_config", "STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json")
+        st_ckpt_rel = cfg.get("neumark_st_checkpoint", "STmodels/pretrained_model/SpeechTokenizer.pt")
+        st_cfg = str(st_cfg_rel if Path(st_cfg_rel).is_absolute() else NEUMARK_ROOT / st_cfg_rel)
+        st_ckpt = str(st_ckpt_rel if Path(st_ckpt_rel).is_absolute() else NEUMARK_ROOT / st_ckpt_rel)
         self.generator = SpeechTokenizer.load_from_checkpoint(st_cfg, st_ckpt).to(self.device)
         self.generator.train()
         ensure_frozen_model_train_mode(self.generator)
