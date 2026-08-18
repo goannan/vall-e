@@ -41,7 +41,6 @@ VALLE_CKPT="${1:-exp/valle_voicemark/epoch-40.pt}"
 INPUT_MANIFEST="${2:-data/tokenized_voicemark/cuts_train.jsonl.gz}"
 OUTPUT_PREFIX="${3:-data/tokenized_voicemark/cuts_train_valle_native}"
 OUTPUT_H5_PREFIX="${4:-data/tokenized_voicemark/libritts_valle_native_train}"
-BATCH_SIZE="${5:-4}"
 
 TOTAL_TASKS=${SLURM_NTASKS:-4}
 
@@ -50,7 +49,6 @@ echo " Starting VALL-E Native Token Elastic Multi-GPU Generation "
 echo " Time:            $(date)                                 "
 echo " Allocated Nodes: ${SLURM_NODELIST:-auto}                 "
 echo " Total Tasks:     ${TOTAL_TASKS} (1 GPU per task)         "
-echo " Batch Size:      ${BATCH_SIZE}                           "
 echo " VALL-E Model:    ${VALLE_CKPT}                           "
 echo " Input Manifest:  ${INPUT_MANIFEST}                       "
 echo " Output Manifest: ${OUTPUT_PREFIX}.jsonl.gz                "
@@ -61,14 +59,13 @@ srun --export=ALL bash -c '
   RANK=${SLURM_PROCID}
   WORLD_SIZE=${SLURM_NTASKS}
 
-  echo "[Node $(hostname)] >> Spawning Worker Rank ${RANK}/${WORLD_SIZE} on assigned GPU (BatchSize: '"${BATCH_SIZE}"')..."
+  echo "[Node $(hostname)] >> Spawning Worker Rank ${RANK}/${WORLD_SIZE} on assigned GPU..."
   
   python generate_valle_native_dataset.py \
     --valle-checkpoint "'"${VALLE_CKPT}"'" \
     --input-manifest "'"${INPUT_MANIFEST}"'" \
     --output-manifest "'"${OUTPUT_PREFIX}.jsonl.gz"'" \
     --output-h5 "'"${OUTPUT_H5_PREFIX}.h5"'" \
-    --batch-size "'"${BATCH_SIZE}"'" \
     --rank "${RANK}" \
     --world-size "${WORLD_SIZE}" \
     --device "cuda:0" > "logs/gen_rank_${RANK}_${SLURM_JOB_ID}.log" 2>&1
