@@ -52,6 +52,7 @@ def parse_args():
     parser.add_argument("--output-manifest", type=str, default="data/tokenized_voicemark/cuts_train_valle_native.jsonl.gz")
     parser.add_argument("--output-h5", type=str, default="data/tokenized_voicemark/libritts_valle_native_train.h5")
     parser.add_argument("--text-tokens", type=str, default="data/tokenized_voicemark/unique_text_tokens.k2symbols")
+    parser.add_argument("--batch-size", type=int, default=4, help="Batch size for parallel generation (default 4)")
     parser.add_argument("--max-samples", type=int, default=-1, help="Max pairs to generate (-1 for all)")
     parser.add_argument("--min-duration", type=float, default=3.0, help="Min cut duration in seconds")
     parser.add_argument("--max-duration", type=float, default=10.0, help="Max cut duration in seconds")
@@ -145,98 +146,157 @@ def main():
 
     generated_cuts = []
 
-    # 5. Generation Loop
+    # 5. Generation Loop (supports Batch Size >= 1 with 100% single-sample fallback)
     with torch.inference_mode():
-        for prompt_cut, target_cut in tqdm(pairs, desc=f"VALL-E Gen [Rank {args.rank}]"):
-            cut_key = f"{target_cut.id}_paired_{prompt_cut.id}"
+        # Process in chunks of batch_size
+        batch_size = max(1, args.batch_size)
+        pair_batches = [pairs[i : i + batch_size] for i in range(0, len(pairs), batch_size)]
 
-            if cut_key in existing_keys:
-                gen_codes_np = h5_file[cut_key][:]
-            else:
-                try:
-                    p_codes_np = prompt_cut.load_features()  # [T_p, 8]
-                except Exception:
-                    continue
+        for batch in tqdm(pair_batches, desc=f"VALL-E Gen [Rank {args.rank}]"):
+            pending_items = []
+            for prompt_cut, target_cut in batch:
+                cut_key = f"{target_cut.id}_paired_{prompt_cut.id}"
+                if cut_key in existing_keys:
+                    gen_codes_np = h5_file[cut_key][:]
+                    # Construct Lhotse Cut
+                    gen_duration = float(gen_codes_np.shape[0] * 0.013333333333333334)
+                    feat = Features(
+                        type="valle_native", num_frames=gen_codes_np.shape[0], num_features=8,
+                        frame_shift=0.013333333333333334, sampling_rate=16000, start=0.0, duration=gen_duration,
+                        storage_type="numpy_hdf5", storage_path=str(Path(args.output_h5).name if args.world_size == 1 else Path(args.output_h5).with_name(f"{Path(args.output_h5).stem}_rank{args.rank}{Path(args.output_h5).suffix}")),
+                        storage_key=cut_key,
+                    )
+                    new_supervision = target_cut.supervisions[0] if target_cut.supervisions else None
+                    generated_cuts.append(MonoCut(
+                        id=cut_key, start=0.0, duration=gen_duration, channel=0, features=feat,
+                        recording=target_cut.recording if target_cut.has_recording else None,
+                        supervisions=[new_supervision] if new_supervision else [],
+                        custom={"prompt_cut_id": prompt_cut.id, "target_cut_id": target_cut.id, "speaker": prompt_cut.supervisions[0].speaker if prompt_cut.supervisions else "unknown"}
+                    ))
+                else:
+                    pending_items.append((prompt_cut, target_cut, cut_key))
 
-                if p_codes_np is None or p_codes_np.shape[0] < 20:
-                    continue
+            if not pending_items:
+                continue
 
-                # Limit prompt audio to prompt_max_frames (~2-3s)
-                prompt_frames = min(args.prompt_max_frames, p_codes_np.shape[0])
-                audio_prompt_tokens = torch.from_numpy(p_codes_np[:prompt_frames]).long().unsqueeze(0).to(device)
-                prompt_len = audio_prompt_tokens.shape[1]
+            if batch_size == 1 or len(pending_items) == 1:
+                # === [ORIGINAL SINGLE SAMPLE PATH] ===
+                for prompt_cut, target_cut, cut_key in pending_items:
+                    try:
+                        p_codes_np = prompt_cut.load_features()
+                        if p_codes_np is None or p_codes_np.shape[0] < 20: continue
+                        prompt_frames = min(args.prompt_max_frames, p_codes_np.shape[0])
+                        audio_prompt_tokens = torch.from_numpy(p_codes_np[:prompt_frames]).long().unsqueeze(0).to(device)
+                        prompt_len = audio_prompt_tokens.shape[1]
 
-                # Full sentences phonemes
-                p_phonemes = prompt_cut.supervisions[0].custom["tokens"]["text"]
-                # Prompt text length proportionally matched to prompt audio slice
-                p_text_len = max(5, int(len(p_phonemes) * (prompt_frames / p_codes_np.shape[0])))
-                p_phonemes_slice = p_phonemes[:p_text_len]
+                        p_phonemes = prompt_cut.supervisions[0].custom["tokens"]["text"]
+                        p_text_len = max(5, int(len(p_phonemes) * (prompt_frames / p_codes_np.shape[0])))
+                        p_phonemes_slice = p_phonemes[:p_text_len]
+                        t_phonemes = target_cut.supervisions[0].custom["tokens"]["text"]
 
-                # Target sentence full text
-                t_phonemes = target_cut.supervisions[0].custom["tokens"]["text"]
+                        full_phonemes = p_phonemes_slice + ["_"] + t_phonemes
+                        text_tokens_idx, text_tokens_lens = text_collater([full_phonemes])
+                        text_tokens_idx = text_tokens_idx.to(device)
+                        text_tokens_lens = text_tokens_lens.to(device)
+                        enroll_x_lens = torch.tensor([len(p_phonemes_slice)], device=device)
 
-                full_phonemes = p_phonemes_slice + ["_"] + t_phonemes
-                text_tokens_idx, text_tokens_lens = text_collater([full_phonemes])
-                text_tokens_idx = text_tokens_idx.to(device)
-                text_tokens_lens = text_tokens_lens.to(device)
+                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
+                            gen_tokens = valle_model.inference(
+                                text_tokens_idx, text_tokens_lens, audio_prompt_tokens,
+                                enroll_x_lens=enroll_x_lens, top_k=args.top_k, temperature=args.temperature,
+                            )
+                        target_tokens = gen_tokens[0, prompt_len:, :].cpu().numpy().astype(np.int16)
+                        if target_tokens.shape[0] < 10: continue
 
-                enroll_x_lens = torch.tensor([len(p_phonemes_slice)], device=device)
+                        h5_file.create_dataset(cut_key, data=target_tokens, compression="gzip")
+                        h5_file.flush()
+                        gen_codes_np = target_tokens
 
-                try:
-                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
-                        gen_tokens = valle_model.inference(
-                            text_tokens_idx,
-                            text_tokens_lens,
-                            audio_prompt_tokens,
-                            enroll_x_lens=enroll_x_lens,
-                            top_k=args.top_k,
-                            temperature=args.temperature,
+                        gen_duration = float(gen_codes_np.shape[0] * 0.013333333333333334)
+                        feat = Features(
+                            type="valle_native", num_frames=gen_codes_np.shape[0], num_features=8,
+                            frame_shift=0.013333333333333334, sampling_rate=16000, start=0.0, duration=gen_duration,
+                            storage_type="numpy_hdf5", storage_path=str(Path(args.output_h5).name if args.world_size == 1 else Path(args.output_h5).with_name(f"{Path(args.output_h5).stem}_rank{args.rank}{Path(args.output_h5).suffix}")),
+                            storage_key=cut_key,
                         )
-                    # Extract generated tokens for target sentence: [T_gen, 8]
-                    target_tokens = gen_tokens[0, prompt_len:, :].cpu().numpy().astype(np.int16)
-                    if target_tokens.shape[0] < 10:
-                        continue
+                        new_supervision = target_cut.supervisions[0] if target_cut.supervisions else None
+                        generated_cuts.append(MonoCut(
+                            id=cut_key, start=0.0, duration=gen_duration, channel=0, features=feat,
+                            recording=target_cut.recording if target_cut.has_recording else None,
+                            supervisions=[new_supervision] if new_supervision else [],
+                            custom={"prompt_cut_id": prompt_cut.id, "target_cut_id": target_cut.id, "speaker": prompt_cut.supervisions[0].speaker if prompt_cut.supervisions else "unknown"}
+                        ))
+                    except Exception as ex:
+                        logging.warning(f"Error generating target {target_cut.id}: {ex}")
+            else:
+                # === [PARALLEL BATCH INFERENCE PATH] ===
+                try:
+                    p_codes_list = []
+                    phonemes_list = []
+                    enroll_lens = []
+                    valid_items = []
 
-                    # Save to H5
-                    h5_file.create_dataset(cut_key, data=target_tokens, compression="gzip")
-                    h5_file.flush()
-                    gen_codes_np = target_tokens
+                    for prompt_cut, target_cut, cut_key in pending_items:
+                        p_codes_np = prompt_cut.load_features()
+                        if p_codes_np is None or p_codes_np.shape[0] < 20: continue
+                        prompt_frames = min(args.prompt_max_frames, p_codes_np.shape[0])
+                        p_codes_slice = p_codes_np[:prompt_frames]
+
+                        p_phonemes = prompt_cut.supervisions[0].custom["tokens"]["text"]
+                        p_text_len = max(5, int(len(p_phonemes) * (prompt_frames / p_codes_np.shape[0])))
+                        p_phonemes_slice = p_phonemes[:p_text_len]
+                        t_phonemes = target_cut.supervisions[0].custom["tokens"]["text"]
+
+                        full_phonemes = p_phonemes_slice + ["_"] + t_phonemes
+                        p_codes_list.append(p_codes_slice)
+                        phonemes_list.append(full_phonemes)
+                        enroll_lens.append(len(p_phonemes_slice))
+                        valid_items.append((prompt_cut, target_cut, cut_key))
+
+                    if not valid_items: continue
+
+                    # Pad prompt audio codes to max_p_len
+                    max_p_len = max(c.shape[0] for c in p_codes_list)
+                    padded_audio_prompts = np.zeros((len(valid_items), max_p_len, 8), dtype=np.int64)
+                    for idx, c in enumerate(p_codes_list):
+                        padded_audio_prompts[idx, :c.shape[0], :] = c
+
+                    audio_prompt_tokens = torch.from_numpy(padded_audio_prompts).to(device)
+                    text_tokens_idx, text_tokens_lens = text_collater(phonemes_list)
+                    text_tokens_idx = text_tokens_idx.to(device)
+                    text_tokens_lens = text_tokens_lens.to(device)
+                    enroll_x_lens = torch.tensor(enroll_lens, device=device)
+
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
+                        batch_results = valle_model.inference_batch(
+                            text_tokens_idx, text_tokens_lens, audio_prompt_tokens,
+                            enroll_x_lens=enroll_x_lens, top_k=args.top_k, temperature=args.temperature,
+                        )
+
+                    for idx, (prompt_cut, target_cut, cut_key) in enumerate(valid_items):
+                        target_tokens = batch_results[idx].cpu().numpy().astype(np.int16)
+                        if target_tokens.shape[0] < 10: continue
+
+                        h5_file.create_dataset(cut_key, data=target_tokens, compression="gzip")
+                        h5_file.flush()
+                        gen_codes_np = target_tokens
+
+                        gen_duration = float(gen_codes_np.shape[0] * 0.013333333333333334)
+                        feat = Features(
+                            type="valle_native", num_frames=gen_codes_np.shape[0], num_features=8,
+                            frame_shift=0.013333333333333334, sampling_rate=16000, start=0.0, duration=gen_duration,
+                            storage_type="numpy_hdf5", storage_path=str(Path(args.output_h5).name if args.world_size == 1 else Path(args.output_h5).with_name(f"{Path(args.output_h5).stem}_rank{args.rank}{Path(args.output_h5).suffix}")),
+                            storage_key=cut_key,
+                        )
+                        new_supervision = target_cut.supervisions[0] if target_cut.supervisions else None
+                        generated_cuts.append(MonoCut(
+                            id=cut_key, start=0.0, duration=gen_duration, channel=0, features=feat,
+                            recording=target_cut.recording if target_cut.has_recording else None,
+                            supervisions=[new_supervision] if new_supervision else [],
+                            custom={"prompt_cut_id": prompt_cut.id, "target_cut_id": target_cut.id, "speaker": prompt_cut.supervisions[0].speaker if prompt_cut.supervisions else "unknown"}
+                        ))
                 except Exception as ex:
-                    logging.warning(f"Error generating target {target_cut.id} with prompt {prompt_cut.id}: {ex}")
-                    continue
-
-            # Construct Lhotse Cut referencing generated tokens, target text, and GT recording
-            gen_duration = float(gen_codes_np.shape[0] * 0.013333333333333334)  # 75 fps
-            feat = Features(
-                type="valle_native",
-                num_frames=gen_codes_np.shape[0],
-                num_features=8,
-                frame_shift=0.013333333333333334,
-                sampling_rate=16000,
-                start=0.0,
-                duration=gen_duration,
-                storage_type="numpy_hdf5",
-                storage_path=str(out_h5_path),
-                storage_key=cut_key,
-            )
-
-            # Keep target supervision and audio recording for GT comparison
-            new_supervision = target_cut.supervisions[0] if target_cut.supervisions else None
-            new_cut = MonoCut(
-                id=cut_key,
-                start=0.0,
-                duration=gen_duration,
-                channel=0,
-                features=feat,
-                recording=target_cut.recording if target_cut.has_recording else None,
-                supervisions=[new_supervision] if new_supervision else [],
-                custom={
-                    "prompt_cut_id": prompt_cut.id,
-                    "target_cut_id": target_cut.id,
-                    "speaker": prompt_cut.supervisions[0].speaker if prompt_cut.supervisions else "unknown",
-                }
-            )
-            generated_cuts.append(new_cut)
+                    logging.warning(f"Batch generation exception: {ex}")
 
     h5_file.close()
     logging.info(f"Saving output manifest to {out_manifest_path} ({len(generated_cuts)} cuts)...")
