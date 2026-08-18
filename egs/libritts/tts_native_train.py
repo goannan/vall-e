@@ -7,6 +7,7 @@ import random
 import sys
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
 import torch
 import torch.nn as nn

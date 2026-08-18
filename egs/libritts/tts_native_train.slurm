@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --nodelist=compute[03,07],mrcompute[02-03]
 #SBATCH --gres=gpu:4
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH -t 14-00:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
@@ -35,7 +35,7 @@ fi
 export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export OMP_NUM_THREADS=4
+export OMP_NUM_THREADS=8
 
 CONFIG_PATH=${1:-"${WORK_DIR}/config_tts_native.json"}
 
@@ -63,12 +63,16 @@ if [ "${NUM_GPUS}" -gt 1 ]; then
   accelerate launch \
     --multi_gpu \
     --num_processes "${NUM_GPUS}" \
-    --mixed_precision no \
+    --mixed_precision bf16 \
     --dynamo_backend no \
     tts_native_train.py --config "${CONFIG_PATH}"
 else
-  echo "Launching Single-GPU Training..."
-  python3 tts_native_train.py --config "${CONFIG_PATH}"
+  echo "Launching Single-GPU Training (with Accelerate bf16)..."
+  accelerate launch \
+    --num_processes 1 \
+    --mixed_precision bf16 \
+    --dynamo_backend no \
+    tts_native_train.py --config "${CONFIG_PATH}"
 fi
 
 echo "=========================================================="

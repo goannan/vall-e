@@ -32,12 +32,8 @@ CONFIG_PATH="${1:-${SCRIPT_DIR}/config_tts_native.json}"
 
 if [ "${NUM_GPUS}" -gt 1 ]; then
   echo "Launching Accelerate Multi-GPU (${NUM_GPUS} GPUs DDP)..."
-  accelerate launch \
-    --multi_gpu \
-    --num_processes "${NUM_GPUS}" \
-    --mixed_precision no \
-    --dynamo_backend no \
-    tts_native_train.py --config "${CONFIG_PATH}"
+  accelerate launch     --multi_gpu     --num_processes "${NUM_GPUS}"     --mixed_precision bf16     --dynamo_backend no     tts_native_train.py --config "${CONFIG_PATH}"
 else
-  python3 tts_native_train.py --config "${CONFIG_PATH}"
+  echo "Launching Single-GPU Training (with Accelerate bf16)..."
+  accelerate launch     --num_processes 1     --mixed_precision bf16     --dynamo_backend no     tts_native_train.py --config "${CONFIG_PATH}"
 fi

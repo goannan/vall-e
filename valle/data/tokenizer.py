@@ -657,7 +657,10 @@ class AudioTokenizer:
     def detect_watermark(self, wav: torch.Tensor):
         if self.watermark_backend in {"voicemark", "neumark"} and self._load_voicemark():
             wav = wav.to(self.device)
-            features = self._vm_st_model.forward_feature(wav, embed_vq1=self._vm_embed_vq1)
+            try:
+                features = self._vm_st_model.forward_feature(wav, embed_vq1=self._vm_embed_vq1)
+            except TypeError:
+                features = self._vm_st_model.forward_feature(wav)
             return self._vm_detector.detect_watermark(features)
 
         if self.watermark_backend == "traceablespeech" and self._load_traceable_speech():
