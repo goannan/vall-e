@@ -26,6 +26,8 @@ echo "=========================================================="
 export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_NVML_BASED_CUDA_CHECK=0
+export CUDA_MODULE_LOADING=LAZY
 export OMP_NUM_THREADS=4
 
 CONFIG_PATH="${1:-${SCRIPT_DIR}/config_tts_native.json}"
