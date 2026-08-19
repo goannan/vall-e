@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from collections import defaultdict
+import importlib.machinery
 from pathlib import Path
 from typing import Dict, List, Optional
 from unittest.mock import MagicMock
@@ -16,12 +17,15 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-# Mock unneeded C++ dependencies
+# Mock unneeded C++ and unused watermark dependencies
 for mod in ["k2", "k2.version", "kaldialign", "pypinyin", "pypinyin.contrib", "pypinyin.contrib.tone_convert",
             "phonemizer", "phonemizer.backend", "phonemizer.backend.espeak", "phonemizer.backend.espeak.language_switch",
-            "phonemizer.backend.espeak.words_mismatch", "phonemizer.punctuation", "phonemizer.separator"]:
+            "phonemizer.backend.espeak.words_mismatch", "phonemizer.punctuation", "phonemizer.separator",
+            "traceableSpeech", "traceableSpeech.env", "traceableSpeech.meldataset", "traceableSpeech.models", "traceableSpeech.watermark"]:
     if mod not in sys.modules:
-        sys.modules[mod] = MagicMock()
+        m = MagicMock()
+        m.__spec__ = importlib.machinery.ModuleSpec(mod, None)
+        sys.modules[mod] = m
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 PROJECT_DIR = SCRIPT_DIR.parent.parent
@@ -42,13 +46,47 @@ def find_neumark_root() -> Path:
                 return p
     return (PROJECT_DIR.parent / "NeuMark").resolve()
 
-NEUMARK_ROOT = find_neumark_root()
+def find_icefall_root() -> Optional[Path]:
+    candidates = [
+        os.environ.get("ICEFALL_ROOT"),
+        PROJECT_DIR.parent / "icefall",
+        SCRIPT_DIR.parent.parent.parent / "icefall",
+        Path.home() / "projects" / "icefall",
+    ]
+    for c in candidates:
+        if c:
+            p = Path(c).resolve()
+            if p.is_dir():
+                return p
+    return None
 
-for p in [str(PROJECT_DIR), str(SCRIPT_DIR), str(NEUMARK_ROOT), str(NEUMARK_ROOT / "train")]:
+NEUMARK_ROOT = find_neumark_root()
+ICEFALL_ROOT = find_icefall_root()
+
+paths_to_add = [
+    str(PROJECT_DIR),
+    str(SCRIPT_DIR),
+    str(NEUMARK_ROOT),
+    str(NEUMARK_ROOT / "train"),
+]
+if ICEFALL_ROOT:
+    paths_to_add.append(str(ICEFALL_ROOT))
+
+for p in paths_to_add:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from icefall.utils import AttributeDict
+try:
+    from icefall.utils import AttributeDict
+except ImportError:
+    class AttributeDict(dict):
+        def __getattr__(self, key):
+            try:
+                return self[key]
+            except KeyError:
+                raise AttributeError(key)
+        def __setattr__(self, key, value):
+            self[key] = value
 from lhotse import CutSet, MonoCut, SupervisionSegment, load_manifest_lazy
 from lhotse.features import Features
 from valle.data import AudioTokenizer

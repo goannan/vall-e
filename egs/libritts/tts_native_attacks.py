@@ -411,30 +411,36 @@ def get_validation_attack_suite(sample_rate: int = 16000) -> List[Tuple[str, str
 
 def format_full_validation_table(step: int, results: Dict[str, Dict[str, float]], quality_metrics: Optional[Dict[str, float]] = None) -> str:
     lines = [
-        "=" * 80,
+        "=" * 90,
         f"  NeuMark Validation Report (Step: {step:07d})",
-        "=" * 80,
-        f"{'Attack Type':<40} | {'Detect ACC':<12} | {'WM Bit Acc':<12}",
-        "-" * 80,
+        "=" * 90,
+        f"{'Attack Type':<30} | {'Pos ACC(TP)':<12} | {'Neg ACC(TN)':<12} | {'Detect ACC':<12} | {'WM Bit Acc':<12}",
+        "-" * 90,
     ]
 
-    dsp_accs, dsp_bits = [], []
-    codec_accs, codec_bits = [], []
+    dsp_pos, dsp_neg, dsp_accs, dsp_bits = [], [], [], []
+    codec_pos, codec_neg, codec_accs, codec_bits = [], [], [], []
 
     # 1. Print DSP Section
     for name, stats in results.items():
         if stats["category"] == "DSP":
+            pos_acc = stats.get("pos_acc", 0.0)
+            neg_acc = stats.get("neg_acc", 0.0)
             det_acc = stats["detect_acc"]
             bit_acc = stats["bit_acc"]
+            dsp_pos.append(pos_acc)
+            dsp_neg.append(neg_acc)
             dsp_accs.append(det_acc)
             dsp_bits.append(bit_acc)
-            lines.append(f"{name:<40} | {det_acc:<12.4f} | {bit_acc:<12.4f}")
+            lines.append(f"{name:<30} | {pos_acc:<12.4f} | {neg_acc:<12.4f} | {det_acc:<12.4f} | {bit_acc:<12.4f}")
 
     if dsp_accs:
+        avg_dsp_pos = sum(dsp_pos) / len(dsp_pos)
+        avg_dsp_neg = sum(dsp_neg) / len(dsp_neg)
         avg_dsp_det = sum(dsp_accs) / len(dsp_accs)
         avg_dsp_bit = sum(dsp_bits) / len(dsp_bits)
-        lines.append(f"{'DSP Avg.':<40} | {avg_dsp_det:<12.4f} | {avg_dsp_bit:<12.4f}")
-        lines.append("-" * 80)
+        lines.append(f"{'DSP Avg.':<30} | {avg_dsp_pos:<12.4f} | {avg_dsp_neg:<12.4f} | {avg_dsp_det:<12.4f} | {avg_dsp_bit:<12.4f}")
+        lines.append("-" * 90)
 
     # 2. Print Codec Section (Grouped by Family)
     codec_families = ["Encodec", "DAC", "SNAC"]
@@ -442,34 +448,44 @@ def format_full_validation_table(step: int, results: Dict[str, Dict[str, float]]
         first = True
         for name, stats in results.items():
             if stats["category"] == "Codec" and stats["family"] == family:
+                pos_acc = stats.get("pos_acc", 0.0)
+                neg_acc = stats.get("neg_acc", 0.0)
                 det_acc = stats["detect_acc"]
                 bit_acc = stats["bit_acc"]
+                codec_pos.append(pos_acc)
+                codec_neg.append(neg_acc)
                 codec_accs.append(det_acc)
                 codec_bits.append(bit_acc)
                 bitrate = stats["bitrate"]
                 if first:
-                    label = f"{family:<16} {bitrate}"
+                    label = f"{family:<14} {bitrate}"
                     first = False
                 else:
-                    label = f"{'':<16} {bitrate}"
-                lines.append(f"{label:<40} | {det_acc:<12.4f} | {bit_acc:<12.4f}")
+                    label = f"{'':<14} {bitrate}"
+                lines.append(f"{label:<30} | {pos_acc:<12.4f} | {neg_acc:<12.4f} | {det_acc:<12.4f} | {bit_acc:<12.4f}")
         lines.append("")
 
     if lines[-1] == "":
         lines.pop()
 
     if codec_accs:
+        avg_codec_pos = sum(codec_pos) / len(codec_pos)
+        avg_codec_neg = sum(codec_neg) / len(codec_neg)
         avg_codec_det = sum(codec_accs) / len(codec_accs)
         avg_codec_bit = sum(codec_bits) / len(codec_bits)
-        lines.append(f"{'Codec Avg.':<40} | {avg_codec_det:<12.4f} | {avg_codec_bit:<12.4f}")
-        lines.append("-" * 80)
+        lines.append(f"{'Codec Avg.':<30} | {avg_codec_pos:<12.4f} | {avg_codec_neg:<12.4f} | {avg_codec_det:<12.4f} | {avg_codec_bit:<12.4f}")
+        lines.append("-" * 90)
 
+    all_pos = dsp_pos + codec_pos
+    all_neg = dsp_neg + codec_neg
     all_accs = dsp_accs + codec_accs
     all_bits = dsp_bits + codec_bits
     if all_accs:
+        total_avg_pos = sum(all_pos) / len(all_pos)
+        total_avg_neg = sum(all_neg) / len(all_neg)
         total_avg_det = sum(all_accs) / len(all_accs)
         total_avg_bit = sum(all_bits) / len(all_bits)
-        lines.append(f"{'Avg.':<40} | {total_avg_det:<12.4f} | {total_avg_bit:<12.4f}")
+        lines.append(f"{'Avg.':<30} | {total_avg_pos:<12.4f} | {total_avg_neg:<12.4f} | {total_avg_det:<12.4f} | {total_avg_bit:<12.4f}")
 
     if quality_metrics:
         lines.append("=" * 80)

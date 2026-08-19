@@ -1,7 +1,7 @@
 {
     "train_manifest": "data/tokenized_voicemark/cuts_train_valle_native.jsonl.gz",
     "valid_manifest": "data/tokenized_voicemark/cuts_dev.jsonl.gz",
-    "results_folder": "exp/tts_native_neumark",
+    "results_folder": "exp/tts_valle_native_neumark",
     "wavlm_checkpoint": "models/wavlm_large_finetune.pth",
     "sample_rate": 16000,
     "batch_size": 12,
@@ -15,7 +15,7 @@
     ],
     "wd": 0.0,
     "seed": 1234,
-    "num_workers": 12,
+    "num_workers": 8,
     "cos_loss_lambda": 2.0,
     "adv_loss_lambda": 2.0,
     "dec_loss_lambda": 1.0,

@@ -22,6 +22,15 @@ from accelerate import (
 )
 
 # -------------------------------------------------------------
+# CUDA & Hardware Acceleration (TF32 on Ampere/Hopper Tensor Cores)
+# -------------------------------------------------------------
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("high")
+
+# -------------------------------------------------------------
 # Dynamic Path Setups
 # -------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -311,8 +320,10 @@ class NeuMarkTrainer:
                 "bitrate": detail,
                 "bit_matches": 0,
                 "total_bits": 0,
-                "det_matches": 0,
-                "total_frames": 0,
+                "pos_matches": 0,
+                "pos_frames": 0,
+                "neg_matches": 0,
+                "neg_frames": 0,
             }
 
         clean_utmos_list, wm_utmos_list = [], []
@@ -379,30 +390,39 @@ class NeuMarkTrainer:
                     except Exception:
                         pass
 
-                # Robustness Evaluation across DSP + Codec attacks
+                # Robustness Evaluation across DSP + Codec attacks (both WM and Clean)
                 for cat, name, detail, atk_fn in val_attacks:
                     key = name if cat == "DSP" else f"{name} {detail}"
+
+                    # 1. Watermarked Audio (+ Attack) -> Evaluates Bit Extraction & True Positives (TP)
                     try:
-                        attacked_audio = atk_fn(wm_audio)
-                    except Exception as e:
-                        attacked_audio = wm_audio
+                        attacked_wm = atk_fn(wm_audio)
+                    except Exception:
+                        attacked_wm = wm_audio
 
-                    embedding = generator.forward_feature(attacked_audio)
-                    logits, chunk_logits = detector(embedding)
-
-                    # Extract bits
-                    detect_prob, pred_bits, detected = detector.detect_watermark(embedding)
+                    emb_wm = generator.forward_feature(attacked_wm)
+                    logits_wm, _ = detector(emb_wm)
+                    _, pred_bits, _ = detector.detect_watermark(emb_wm)
                     bit_correct = (pred_bits.long() == message.long()).sum().item()
-                    total_b = message.numel()
+                    tp_correct = (logits_wm > 0.0).sum().item()
 
-                    # VAD detection accuracy
-                    det_correct = (logits > 0.0).sum().item()
-                    total_f = logits.numel()
+                    # 2. Clean Unwatermarked Audio (+ Attack) -> Evaluates True Negatives (TN)
+                    try:
+                        attacked_clean = atk_fn(clean_audio)
+                    except Exception:
+                        attacked_clean = clean_audio
 
+                    emb_clean = generator.forward_feature(attacked_clean)
+                    logits_clean, _ = detector(emb_clean)
+                    tn_correct = (logits_clean <= 0.0).sum().item()
+
+                    # 3. Accumulate Statistics
                     results[key]["bit_matches"] += bit_correct
-                    results[key]["total_bits"] += total_b
-                    results[key]["det_matches"] += det_correct
-                    results[key]["total_frames"] += total_f
+                    results[key]["total_bits"] += message.numel()
+                    results[key]["pos_matches"] += tp_correct
+                    results[key]["pos_frames"] += logits_wm.numel()
+                    results[key]["neg_matches"] += tn_correct
+                    results[key]["neg_frames"] += logits_clean.numel()
 
                 count += 1
 
@@ -410,17 +430,23 @@ class NeuMarkTrainer:
         summary = {}
         for key, stats in results.items():
             bit_acc = stats["bit_matches"] / max(1, stats["total_bits"])
-            det_acc = stats["det_matches"] / max(1, stats["total_frames"])
+            pos_acc = stats["pos_matches"] / max(1, stats["pos_frames"])
+            neg_acc = stats["neg_matches"] / max(1, stats["neg_frames"])
+            det_acc = (stats["pos_matches"] + stats["neg_matches"]) / max(1, stats["pos_frames"] + stats["neg_frames"])
             summary[key] = {
                 "category": stats["category"],
                 "family": stats["family"],
                 "bitrate": stats["bitrate"],
                 "bit_acc": bit_acc,
+                "pos_acc": pos_acc,
+                "neg_acc": neg_acc,
                 "detect_acc": det_acc,
             }
             # TensorBoard logging
             clean_tag = key.lower().replace(" ", "_").replace("(", "").replace(")", "").replace(".", "_").replace("+", "p").replace("%", "pct").replace("-", "_")
             self.writer.add_scalar(f"val/{clean_tag}/bit_acc", bit_acc, global_step=step)
+            self.writer.add_scalar(f"val/{clean_tag}/pos_acc", pos_acc, global_step=step)
+            self.writer.add_scalar(f"val/{clean_tag}/neg_acc", neg_acc, global_step=step)
             self.writer.add_scalar(f"val/{clean_tag}/detect_acc", det_acc, global_step=step)
 
         # Compute average quality metrics (Clean vs Watermarked)
@@ -563,9 +589,13 @@ class NeuMarkTrainer:
                         torch.stack(list(adversarial_components.values())).mean() + 2.0 * loss_fm
                     ) * self.adv_loss_lambda
 
+                # Decode clean latent to waveform (for exact negative sample supervision)
+                with torch.no_grad():
+                    clean_audio = unwrapped_gen.decoder(z_q)
+
                 # F. Watermark Decoding & Detection Loss (Strictly Encodec 3/6/12k, VC Masking, Clean)
                 augmented_audio, vad_labels, attack_name = apply_train_augmentation(
-                    wm_audio, sample_rate=self.sample_rate, orig_audio=real_audio
+                    wm_audio, sample_rate=self.sample_rate, orig_audio=clean_audio
                 )
                 logits, chunk_logits = self.detect_watermark(augmented_audio, return_logits=True)
 
@@ -575,9 +605,9 @@ class NeuMarkTrainer:
                 min_lens_pos = min(logits.shape[-1], vad_labels.shape[-1])
                 loss_vad_pos = vad_based_loss(logits[..., :min_lens_pos], vad_labels[..., :min_lens_pos], from_logits=True) * self.vad_loss_lambda
 
-                # Negative sample supervision (Real unwatermarked audio)
+                # Negative sample supervision (Exact clean unwatermarked TTS audio)
                 augmented_neg, _, _ = apply_train_augmentation(
-                    real_audio, sample_rate=self.sample_rate, orig_audio=None
+                    clean_audio, sample_rate=self.sample_rate, orig_audio=None
                 )
                 neg_logits, _ = self.detect_watermark(augmented_neg, return_logits=True)
                 vad_labels_neg = torch.zeros_like(neg_logits)
@@ -637,20 +667,17 @@ class NeuMarkTrainer:
                         self.scheduler_generator.step()
                         self.scheduler_discriminator.step()
 
-                # GPU VRAM Monitoring
+                # GPU VRAM Monitoring (recorded to TensorBoard only)
                 vram_info = {}
                 if torch.cuda.is_available():
                     alloc_gb = torch.cuda.memory_allocated() / (1024 ** 3)
                     max_alloc_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
                     res_gb = torch.cuda.memory_reserved() / (1024 ** 3)
-                    total_vram_gb = torch.cuda.get_device_properties(self.device).total_memory / (1024 ** 3)
                     vram_info = {
                         "system/vram_allocated_gb": alloc_gb,
                         "system/vram_max_peak_gb": max_alloc_gb,
                         "system/vram_reserved_gb": res_gb,
                     }
-                    if self.is_main and (steps in {1, 5, 10} or steps % self.cfg.get("log_steps", 50) == 0):
-                        print(f"\n[GPU Memory @ Step {steps:05d}] Alloc: {alloc_gb:.2f}GB / {total_vram_gb:.1f}GB ({alloc_gb / max(1e-5, total_vram_gb) * 100:.1f}%) | Peak: {max_alloc_gb:.2f}GB | Res: {res_gb:.2f}GB | Atk: {attack_name}", flush=True)
 
                 if steps % self.cfg.get("log_steps", 50) == 0 or steps in {1, 5, 10}:
                     log_dict = {

@@ -3,8 +3,8 @@
 #PJM -L gpu=1
 #PJM -L elapse=144:00:00
 #PJM -L jobenv=singularity
-#PJM -o logs/tts_native_%j.out
-#PJM -e logs/tts_native_%j.err
+#PJM -o logs/tts_valle_native_%j.out
+#PJM -e logs/tts_valle_native_%j.err
 
 set -euo pipefail
 
@@ -17,4 +17,4 @@ module load singularity-ce
 
 SIF="${SIF:-$HOME/latest.sif}"
 
-singularity exec --nv --bind "$HOME" "$SIF" bash "${SCRIPT_DIR}/tts_native_train.sh" "$@"
+singularity exec --nv --bind "$HOME" "$SIF" bash "${SCRIPT_DIR}/tts_valle_native_train.sh" "$@"

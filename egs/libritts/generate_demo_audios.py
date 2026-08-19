@@ -5,7 +5,10 @@ import torchaudio
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parents[1]
-NEUMARK_ROOT = Path('/home/wu25/mrnas04home/projects/NeuMark').resolve()
+WORKSPACE_ROOT = SCRIPT_DIR.parents[3]
+NEUMARK_ROOT = (SCRIPT_DIR / "../../../NeuMark").resolve()
+if not NEUMARK_ROOT.exists():
+    NEUMARK_ROOT = WORKSPACE_ROOT / "projects" / "NeuMark"
 
 for p in [str(NEUMARK_ROOT), str(NEUMARK_ROOT / 'train'), str(SCRIPT_DIR)]:
     if p not in sys.path:
@@ -14,6 +17,7 @@ for p in [str(NEUMARK_ROOT), str(NEUMARK_ROOT / 'train'), str(SCRIPT_DIR)]:
 from models import WMEmbedder, WMDetector
 from STmodels.model import SpeechTokenizer
 from lhotse import load_manifest_lazy
+from tts_native_dataset import resolve_wav_path
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
@@ -69,14 +73,30 @@ for s_idx in test_indices:
     codes = torch.from_numpy(codes_np).long().transpose(0, 1).unsqueeze(0).to(device)
 
     # Prompt Audio
+    prompt_audio = None
     try:
-        audio_np = cut.load_audio()
-        prompt_audio = torch.from_numpy(audio_np).float()
-        if cut.sampling_rate != 16000:
-            prompt_audio = torchaudio.functional.resample(prompt_audio, cut.sampling_rate, 16000)
+        if hasattr(cut, "recording") and cut.recording and cut.recording.sources:
+            orig_src = cut.recording.sources[0].source
+            wav_p = resolve_wav_path(orig_src)
+            if wav_p:
+                prompt_audio, orig_sr = torchaudio.load(str(wav_p))
+                if orig_sr != 16000:
+                    prompt_audio = torchaudio.functional.resample(prompt_audio, orig_sr, 16000)
+                start_sample = int(cut.start * 16000)
+                num_samples = int(cut.duration * 16000)
+                prompt_audio = prompt_audio[:, start_sample : start_sample + num_samples]
     except Exception as e:
-        print(f'Warning loading raw audio: {e}')
-        prompt_audio = torch.zeros((1, codes.shape[-1] * 320))
+        print(f'Warning resolving raw audio: {e}')
+
+    if prompt_audio is None:
+        try:
+            audio_np = cut.load_audio()
+            prompt_audio = torch.from_numpy(audio_np).float()
+            if cut.sampling_rate != 16000:
+                prompt_audio = torchaudio.functional.resample(prompt_audio, cut.sampling_rate, 16000)
+        except Exception as e:
+            print(f'Warning loading raw audio: {e}')
+            prompt_audio = torch.zeros((1, codes.shape[-1] * 320))
 
     with torch.no_grad():
         codes_qbt = codes.permute(1, 0, 2).contiguous() if codes.shape[1] == 8 else codes
