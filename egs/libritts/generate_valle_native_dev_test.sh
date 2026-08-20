@@ -61,7 +61,7 @@ generate_split() {
     python3 -c "
 import gzip, glob
 from pathlib import Path
-shards = sorted(glob.glob('${OUT_PREFIX}_rank*.jsonl.gz'))
+shards = sorted(glob.glob('${OUT_PREFIX}*rank*.jsonl.gz'))
 if shards:
     out_file = '${OUT_PREFIX}.jsonl.gz'
     count = 0
