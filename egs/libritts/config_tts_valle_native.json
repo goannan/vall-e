@@ -4,7 +4,7 @@
     "results_folder": "exp/tts_valle_native_neumark",
     "wavlm_checkpoint": "models/wavlm_large_finetune.pth",
     "sample_rate": 16000,
-    "batch_size": 12,
+    "batch_size": 4,
     "epochs": 20,
     "learning_rate": 5e-05,
     "initial_learning_rate": 1e-06,
@@ -30,6 +30,6 @@
     "neumark_config": "STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json",
     "neumark_st_checkpoint": "STmodels/pretrained_model/SpeechTokenizer.pt",
     "num_val_samples": 50,
-    "gradient_accumulation_steps": 1,
-    "max_duration": 10.5
+    "gradient_accumulation_steps": 3,
+    "max_duration": 8.0
 }

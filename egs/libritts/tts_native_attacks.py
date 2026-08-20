@@ -161,8 +161,9 @@ class EncodecAttack:
         model = cls.get_model(device)
         model.set_target_bandwidth(bandwidth)
 
-        with torch.no_grad():
-            wav_24k = julius.resample_frac(wav, sample_rate, 24000) if sample_rate != 24000 else wav
+        with torch.inference_mode():
+            wav_detached = wav.detach()
+            wav_24k = julius.resample_frac(wav_detached, sample_rate, 24000) if sample_rate != 24000 else wav_detached
             if wav_24k.ndim == 2:
                 wav_24k = wav_24k.unsqueeze(1)
             frames = model.encode(wav_24k)
