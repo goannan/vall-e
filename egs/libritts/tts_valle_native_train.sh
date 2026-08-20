@@ -32,6 +32,15 @@ export OMP_NUM_THREADS=4
 
 CONFIG_PATH="${1:-${SCRIPT_DIR}/config_tts_valle_native.json}"
 
+# Check and auto-generate Dev & Test VALL-E tokens if missing
+if [ ! -f "data/tokenized_voicemark/cuts_dev_valle_native.jsonl.gz" ] || [ ! -f "data/tokenized_voicemark/cuts_test_valle_native.jsonl.gz" ]; then
+  echo "=========================================================="
+  echo " Dev/Test VALL-E token manifests not found.               "
+  echo " Auto-generating Dev & Test tokens before training...     "
+  echo "=========================================================="
+  bash "${SCRIPT_DIR}/generate_valle_native_dev_test.sh"
+fi
+
 if [ "${NUM_GPUS}" -gt 1 ]; then
   echo "Launching Accelerate Multi-GPU (${NUM_GPUS} GPUs DDP)..."
   accelerate launch \

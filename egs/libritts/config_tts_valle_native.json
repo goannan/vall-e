@@ -1,10 +1,10 @@
 {
     "train_manifest": "data/tokenized_voicemark/cuts_train_valle_native.jsonl.gz",
-    "valid_manifest": "data/tokenized_voicemark/cuts_dev.jsonl.gz",
+    "valid_manifest": "data/tokenized_voicemark/cuts_dev_valle_native.jsonl.gz",
     "results_folder": "exp/tts_valle_native_neumark",
     "wavlm_checkpoint": "models/wavlm_large_finetune.pth",
     "sample_rate": 16000,
-    "batch_size": 10,
+    "batch_size": 8,
     "epochs": 20,
     "learning_rate": 5e-05,
     "initial_learning_rate": 1e-06,
