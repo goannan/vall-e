@@ -224,18 +224,15 @@ def main():
 
                 # Full sentences phonemes
                 p_phonemes = prompt_cut.supervisions[0].custom["tokens"]["text"]
-                p_text_len = max(5, int(len(p_phonemes) * (prompt_frames / p_codes_np.shape[0])))
-                p_phonemes_slice = p_phonemes[:p_text_len]
-
                 # Target sentence full text
                 t_phonemes = target_cut.supervisions[0].custom["tokens"]["text"]
 
-                full_phonemes = p_phonemes_slice + ["_"] + t_phonemes
+                full_phonemes = p_phonemes + ["_"] + t_phonemes
                 text_tokens_idx, text_tokens_lens = text_collater([full_phonemes])
                 text_tokens_idx = text_tokens_idx.to(device)
                 text_tokens_lens = text_tokens_lens.to(device)
 
-                enroll_x_lens = torch.tensor([len(p_phonemes_slice)], device=device)
+                enroll_x_lens = torch.tensor([len(p_phonemes)], device=device)
 
                 try:
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16):
@@ -248,7 +245,8 @@ def main():
                             temperature=args.temperature,
                         )
                     # Extract generated tokens for target sentence: [T_gen, 8]
-                    target_tokens = gen_tokens[0, prompt_len:, :].cpu().numpy().astype(np.int16)
+                    # Note: valle_model.inference already strips prompt_len internally!
+                    target_tokens = gen_tokens[0].cpu().numpy().astype(np.int16)
                     if target_tokens.shape[0] < 10:
                         continue
 
@@ -266,12 +264,12 @@ def main():
                 type="valle_native",
                 num_frames=gen_codes_np.shape[0],
                 num_features=8,
-                frame_shift=0.013333333333333334,
+                frame_shift=0.02,
                 sampling_rate=16000,
                 start=0.0,
-                duration=gen_duration,
+                duration=float(gen_codes_np.shape[0] * 0.02),
                 storage_type="numpy_hdf5",
-                storage_path=str(Path(args.output_h5).name if args.world_size == 1 else Path(args.output_h5).with_name(f"{Path(args.output_h5).stem}_rank{args.rank}{Path(args.output_h5).suffix}")),
+                storage_path=str(Path(args.output_h5) if args.world_size == 1 else Path(args.output_h5).with_name(f"{Path(args.output_h5).stem}_rank{args.rank}{Path(args.output_h5).suffix}")),
                 storage_key=cut_key,
             )
 
