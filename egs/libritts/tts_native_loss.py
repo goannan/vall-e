@@ -238,3 +238,134 @@ def latent_cosine_loss(z_wm: torch.Tensor, z_q: torch.Tensor) -> torch.Tensor:
     z_wm = z_wm[..., :min_len]
     z_q = z_q[..., :min_len]
     return cos_loss(z_wm, z_q)
+
+
+# ==========================================
+# 5. Multi-scale Mel Spectrogram Loss (NeuMark)
+# ==========================================
+_mel_basis_cache: Dict[str, torch.Tensor] = {}
+_hann_window_cache: Dict[str, torch.Tensor] = {}
+
+
+def dynamic_range_compression_torch(x: torch.Tensor, C: float = 1.0, clip_val: float = 1e-5) -> torch.Tensor:
+    return torch.log(torch.clamp(x, min=clip_val) * C)
+
+
+def mel_spectrogram(
+    y: torch.Tensor,
+    n_fft: int = 1024,
+    num_mels: int = 80,
+    sample_rate: int = 16000,
+    hop_size: int = 240,
+    win_size: int = 1024,
+    fmin: float = 0.0,
+    fmax: Optional[float] = 8000.0,
+    center: bool = False,
+) -> torch.Tensor:
+    """Extract Log-Mel spectrogram matching NeuMark pipeline."""
+    if y.ndim == 3:
+        y = y.squeeze(1)
+
+    n_fft = int(n_fft)
+    num_mels = int(num_mels)
+    sample_rate = int(sample_rate)
+    hop_size = int(hop_size)
+    win_size = int(win_size)
+    fmin = float(fmin)
+    fmax = float(fmax) if fmax is not None else float(sample_rate // 2)
+
+    global _mel_basis_cache, _hann_window_cache
+    dev = y.device
+    basis_key = f"{fmax}_{win_size}_{n_fft}_{num_mels}_{dev}"
+    if basis_key not in _mel_basis_cache:
+        mel_transform = torchaudio.transforms.MelScale(
+            n_mels=num_mels,
+            sample_rate=sample_rate,
+            n_stft=n_fft // 2 + 1,
+            f_min=fmin,
+            f_max=fmax,
+            norm="slaney",
+            mel_scale="htk",
+        )
+        _mel_basis_cache[basis_key] = mel_transform.fb.float().T.to(dev)
+
+    win_key = f"{win_size}_{dev}"
+    if win_key not in _hann_window_cache:
+        _hann_window_cache[win_key] = torch.hann_window(win_size, device=dev)
+
+    # Pad waveform
+    pad_len = int((n_fft - hop_size) / 2)
+    y_padded = F.pad(y.unsqueeze(1), (pad_len, pad_len), mode="reflect").squeeze(1)
+
+    spec_complex = torch.stft(
+        y_padded,
+        n_fft,
+        hop_length=hop_size,
+        win_length=win_size,
+        window=_hann_window_cache[win_key],
+        center=center,
+        pad_mode="reflect",
+        normalized=False,
+        onesided=True,
+        return_complex=True,
+    )
+
+    spec = torch.view_as_real(spec_complex)
+    spec = torch.sqrt(spec[..., 0] ** 2 + spec[..., 1] ** 2 + 1e-9)
+    spec = torch.matmul(_mel_basis_cache[basis_key], spec)
+    spec = dynamic_range_compression_torch(spec)
+    return spec
+
+
+def single_mel_loss(x: torch.Tensor, x_hat: torch.Tensor, **kwargs) -> torch.Tensor:
+    """L1 Mel Spectrogram loss between reference x and watermarked x_hat."""
+    x_mel = mel_spectrogram(x, **kwargs)
+    x_hat_mel = mel_spectrogram(x_hat, **kwargs)
+    min_len = min(x_mel.size(-1), x_hat_mel.size(-1))
+    return F.l1_loss(x_mel[..., :min_len], x_hat_mel[..., :min_len])
+
+
+class MultiScaleMelLoss(nn.Module):
+    """Multi-scale Mel Spectrogram L1 Loss matching NeuMark default configuration."""
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        n_fft: int = 1024,
+        hop_size: int = 240,
+        win_size: int = 1024,
+        num_mels: int = 80,
+        fmin: float = 0.0,
+        fmax: Optional[float] = 8000.0,
+        lambdas: Optional[List[float]] = None,
+    ):
+        super().__init__()
+        self.sample_rate = sample_rate
+        self.lambdas = lambdas or [5.0, 1.0, 1.0, 1.0]
+        self.kwargs_list = []
+        mult = 1
+        for _ in range(len(self.lambdas)):
+            self.kwargs_list.append(
+                {
+                    "n_fft": n_fft // mult,
+                    "num_mels": num_mels,
+                    "sample_rate": sample_rate,
+                    "hop_size": hop_size // mult,
+                    "win_size": win_size // mult,
+                    "fmin": fmin,
+                    "fmax": fmax,
+                }
+            )
+            mult *= 2
+
+    def forward(self, ref_audio: torch.Tensor, wm_audio: torch.Tensor) -> torch.Tensor:
+        """
+        ref_audio: [B, 1, T] or [B, T] (Reconstructed audio without watermark)
+        wm_audio:  [B, 1, T] or [B, T] (Watermarked audio)
+        """
+        total_mel = torch.zeros((), device=ref_audio.device, dtype=torch.float32)
+        for w, kw in zip(self.lambdas, self.kwargs_list):
+            l_scale = single_mel_loss(ref_audio, wm_audio, **kw)
+            total_mel = total_mel + (w * l_scale)
+        return total_mel
+
