@@ -571,6 +571,7 @@ class VALLF(nn.Module):
         enroll_x_lens: Union[torch.Tensor, None] = None,
         top_k: int = -100,
         temperature: float = 1.0,
+        sample_on_cpu: bool = False,
     ) -> torch.Tensor:
         """
         Args:
@@ -632,7 +633,11 @@ class VALLF(nn.Module):
             )
             logits = self.ar_predict_layer(y_dec[:, -1])
             samples = topk_sampling(
-                logits, top_k=top_k, top_p=1.0, temperature=temperature
+                logits,
+                top_k=top_k,
+                top_p=1.0,
+                temperature=temperature,
+                sample_on_cpu=sample_on_cpu,
             )
 
             if (
@@ -1130,6 +1135,7 @@ class VALLE(VALLF):
         enroll_x_lens: torch.Tensor,
         top_k: int = -100,
         temperature: float = 1.0,
+        sample_on_cpu: bool = False,
     ) -> torch.Tensor:
         """
         Args:
@@ -1202,7 +1208,11 @@ class VALLE(VALLF):
             )
             logits = self.ar_predict_layer(xy_dec[:, -1])
             samples = topk_sampling(
-                logits, top_k=top_k, top_p=1.0, temperature=temperature
+                logits,
+                top_k=top_k,
+                top_p=1.0,
+                temperature=temperature,
+                sample_on_cpu=sample_on_cpu,
             )
 
             if (
@@ -1448,13 +1458,30 @@ def top_k_top_p_filtering(
     return logits
 
 
-def topk_sampling(logits, top_k=10, top_p=1.0, temperature=1.0):
+def topk_sampling(
+    logits, top_k=10, top_p=1.0, temperature=1.0, sample_on_cpu=False
+):
     # temperature: (`optional`) float
     #     The value used to module the next token probabilities. Must be strictly positive. Default to 1.0.
     # top_k: (`optional`) int
     #     The number of highest probability vocabulary tokens to keep for top-k-filtering. Between 1 and infinity. Default to 50.
     # top_p: (`optional`) float
     #     The cumulative probability of parameter highest probability vocabulary tokens to keep for nucleus sampling. Must be between 0 and 1. Default to 1.
+
+    if sample_on_cpu and logits.device.type != "cpu":
+        # torch.multinomial uses a device-specific RNG/implementation.  The
+        # lab checkpoint's validated synthesis path sampled on CPU; on H100 the
+        # same seed follows a different, poor AR trajectory.  Sampling only the
+        # 1025-way next-token logits on CPU is cheap while keeping the
+        # Transformer and NAR computation on GPU.
+        cpu_logits = logits.detach().to(device="cpu", dtype=torch.float32)
+        return topk_sampling(
+            cpu_logits,
+            top_k=top_k,
+            top_p=top_p,
+            temperature=temperature,
+            sample_on_cpu=False,
+        ).to(logits.device)
 
     # Temperature (higher temperature => more likely to sample low probability tokens)
     if temperature != 1.0:

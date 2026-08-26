@@ -21,8 +21,10 @@ export PYTHONPATH="${SCRIPT_DIR}/../../:${SCRIPT_DIR}/../../../icefall:${SCRIPT_
 
 VALLE_CKPT="${1:-exp/valle_voicemark/epoch-40.pt}"
 INPUT_MANIFEST="${2:-data/tokenized_voicemark/cuts_train.jsonl.gz}"
-OUTPUT_PREFIX="${3:-data/tokenized_voicemark/cuts_train_valle_native}"
-OUTPUT_H5_PREFIX="${4:-data/tokenized_voicemark/libritts_valle_native_train}"
+OUTPUT_PREFIX="${3:-data/tokenized_voicemark/cuts_train_valle_native_v4}"
+OUTPUT_H5_PREFIX="${4:-data/tokenized_voicemark/libritts_valle_native_train_v4}"
+ST_CONFIG="${ST_CONFIG:-STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json}"
+ST_CHECKPOINT="${ST_CHECKPOINT:-STmodels/pretrained_model/SpeechTokenizer.pt}"
 
 # Auto-detect available GPU count & configure concurrent workers
 NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 1)
@@ -38,6 +40,7 @@ echo " Time:            $(date)                                 "
 echo " GPU Count:       ${NUM_GPUS}                             "
 echo " Workers/GPU:     ${WORKERS_PER_GPU} (Total ${TOTAL_WORKERS} Workers) "
 echo " VALL-E Model:    ${VALLE_CKPT}                           "
+echo " Prompt Tokens:   single-WAV SpeechTokenizer encode       "
 echo " Input Manifest:  ${INPUT_MANIFEST}                       "
 echo " Output Manifest: ${OUTPUT_PREFIX}.jsonl.gz                "
 echo "=========================================================="
@@ -53,6 +56,8 @@ for r in $(seq 0 $((TOTAL_WORKERS - 1))); do
         --input-manifest "${INPUT_MANIFEST}" \
         --output-manifest "${OUTPUT_PREFIX}.jsonl.gz" \
         --output-h5 "${OUTPUT_H5_PREFIX}.h5" \
+        --st-config "${ST_CONFIG}" \
+        --st-checkpoint "${ST_CHECKPOINT}" \
         --rank "${r}" \
         --world-size "${TOTAL_WORKERS}" \
         --device "cuda:${GPU_ID}" > "${LOG_FILE}" 2>&1 &

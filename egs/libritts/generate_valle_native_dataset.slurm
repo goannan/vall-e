@@ -39,8 +39,10 @@ export OMP_NUM_THREADS=4
 
 VALLE_CKPT="${1:-exp/valle_voicemark/epoch-40.pt}"
 INPUT_MANIFEST="${2:-data/tokenized_voicemark/cuts_train.jsonl.gz}"
-OUTPUT_PREFIX="${3:-data/tokenized_voicemark/cuts_train_valle_native}"
-OUTPUT_H5_PREFIX="${4:-data/tokenized_voicemark/libritts_valle_native_train}"
+OUTPUT_PREFIX="${3:-data/tokenized_voicemark/cuts_train_valle_native_v4}"
+OUTPUT_H5_PREFIX="${4:-data/tokenized_voicemark/libritts_valle_native_train_v4}"
+ST_CONFIG="${ST_CONFIG:-STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json}"
+ST_CHECKPOINT="${ST_CHECKPOINT:-STmodels/pretrained_model/SpeechTokenizer.pt}"
 
 TOTAL_TASKS=${SLURM_NTASKS:-4}
 
@@ -66,6 +68,8 @@ srun --export=ALL bash -c '
     --input-manifest "'"${INPUT_MANIFEST}"'" \
     --output-manifest "'"${OUTPUT_PREFIX}.jsonl.gz"'" \
     --output-h5 "'"${OUTPUT_H5_PREFIX}.h5"'" \
+    --st-config "'"${ST_CONFIG}"'" \
+    --st-checkpoint "'"${ST_CHECKPOINT}"'" \
     --rank "${RANK}" \
     --world-size "${WORLD_SIZE}" \
     --device "cuda:0" > "logs/gen_rank_${RANK}_${SLURM_JOB_ID}.log" 2>&1

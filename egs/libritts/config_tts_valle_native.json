@@ -1,6 +1,6 @@
 {
-    "train_manifest": "data/tokenized_voicemark/cuts_train_valle_native.jsonl.gz",
-    "valid_manifest": "data/tokenized_voicemark/cuts_dev_valle_native.jsonl.gz",
+    "train_manifest": "data/tokenized_voicemark/cuts_train_valle_native_v4.jsonl.gz",
+    "valid_manifest": "data/tokenized_voicemark/cuts_dev_valle_native_v4.jsonl.gz",
     "results_folder": "exp/tts_valle_native_neumark",
     "wavlm_checkpoint": "models/wavlm_large_finetune.pth",
     "sample_rate": 16000,

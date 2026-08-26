@@ -23,6 +23,8 @@ export OMP_NUM_THREADS=4
 export PYTHONPATH="${SCRIPT_DIR}/../../:${SCRIPT_DIR}/../../../icefall:${SCRIPT_DIR}/../../../NeuMark:${PYTHONPATH:-}"
 
 VALLE_CKPT="${VALLE_CKPT:-exp/valle_voicemark/epoch-40.pt}"
+ST_CONFIG="${ST_CONFIG:-STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json}"
+ST_CHECKPOINT="${ST_CHECKPOINT:-STmodels/pretrained_model/SpeechTokenizer.pt}"
 CONFIG_PATH="${1:-${SCRIPT_DIR}/config_tts_valle_native.json}"
 
 # Auto-detect available GPU count
@@ -46,12 +48,34 @@ echo "=========================================================="
 prepare_split() {
     local SPLIT_NAME="$1"
     local INPUT_MF="data/tokenized_voicemark/cuts_${SPLIT_NAME}.jsonl.gz"
-    local OUT_PREFIX="data/tokenized_voicemark/cuts_${SPLIT_NAME}_valle_native"
-    local OUT_H5="data/tokenized_voicemark/libritts_valle_native_${SPLIT_NAME}"
+    local OUT_PREFIX="data/tokenized_voicemark/cuts_${SPLIT_NAME}_valle_native_v4"
+    local OUT_H5="data/tokenized_voicemark/libritts_valle_native_${SPLIT_NAME}_v4"
 
     if [ -f "${OUT_PREFIX}.jsonl.gz" ] && [ -s "${OUT_PREFIX}.jsonl.gz" ]; then
-        echo "[Prepare] Found existing ${OUT_PREFIX}.jsonl.gz, skipping generation."
-        return 0
+        if python3 - "${OUT_PREFIX}.jsonl.gz" <<'PY'
+import gzip
+import json
+import sys
+
+with gzip.open(sys.argv[1], "rt") as stream:
+    first_cut = json.loads(next(stream))
+metadata = first_cut.get("custom") or {}
+raise SystemExit(
+    0
+    if metadata.get("generation_version") == 4
+    and metadata.get("prompt_token_source")
+    == "single_wav_speechtokenizer_encode"
+    else 1
+)
+PY
+        then
+            echo "[Prepare] Found corrected ${OUT_PREFIX}.jsonl.gz, skipping generation."
+            return 0
+        fi
+        echo "[Prepare] ERROR: ${OUT_PREFIX}.jsonl.gz is a legacy/incompatible synthesis." >&2
+        echo "[Prepare] Keep it as a backup and choose fresh manifest/H5 output paths before training." >&2
+        echo "[Prepare] Refusing to silently train on tokens made with the wrong vocabulary/alignment." >&2
+        return 1
     fi
 
     echo "----------------------------------------------------------"
@@ -70,6 +94,8 @@ prepare_split() {
             --input-manifest "${INPUT_MF}" \
             --output-manifest "${OUT_PREFIX}.jsonl.gz" \
             --output-h5 "${OUT_H5}.h5" \
+            --st-config "${ST_CONFIG}" \
+            --st-checkpoint "${ST_CHECKPOINT}" \
             --rank "${r}" \
             --world-size "${TOTAL_WORKERS}" \
             --device "cuda:${GPU_ID}" > "${LOG_FILE}" 2>&1 &

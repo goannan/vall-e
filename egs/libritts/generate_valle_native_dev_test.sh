@@ -20,6 +20,8 @@ export OMP_NUM_THREADS=4
 export PYTHONPATH="${SCRIPT_DIR}/../../:${SCRIPT_DIR}/../../../icefall:${SCRIPT_DIR}/../../../NeuMark:${PYTHONPATH:-}"
 
 VALLE_CKPT="${1:-exp/valle_voicemark/epoch-40.pt}"
+ST_CONFIG="${ST_CONFIG:-STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json}"
+ST_CHECKPOINT="${ST_CHECKPOINT:-STmodels/pretrained_model/SpeechTokenizer.pt}"
 NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 1)
 WORKERS_PER_GPU=${WORKERS_PER_GPU:-8}
 TOTAL_WORKERS=$((NUM_GPUS * WORKERS_PER_GPU))
@@ -28,8 +30,8 @@ JOB_ID="${PJM_JOBID:-manual}"
 generate_split() {
     local SPLIT_NAME="$1"
     local INPUT_MF="data/tokenized_voicemark/cuts_${SPLIT_NAME}.jsonl.gz"
-    local OUT_PREFIX="data/tokenized_voicemark/cuts_${SPLIT_NAME}_valle_native"
-    local OUT_H5="data/tokenized_voicemark/libritts_valle_native_${SPLIT_NAME}"
+    local OUT_PREFIX="data/tokenized_voicemark/cuts_${SPLIT_NAME}_valle_native_v4"
+    local OUT_H5="data/tokenized_voicemark/libritts_valle_native_${SPLIT_NAME}_v4"
 
     echo "=========================================================="
     echo " Generating VALL-E Tokens for ${SPLIT_NAME} Set           "
@@ -47,6 +49,8 @@ generate_split() {
             --input-manifest "${INPUT_MF}" \
             --output-manifest "${OUT_PREFIX}.jsonl.gz" \
             --output-h5 "${OUT_H5}.h5" \
+            --st-config "${ST_CONFIG}" \
+            --st-checkpoint "${ST_CHECKPOINT}" \
             --rank "${r}" \
             --world-size "${TOTAL_WORKERS}" \
             --device "cuda:${GPU_ID}" > "${LOG_FILE}" 2>&1 &

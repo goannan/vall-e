@@ -1,0 +1,17 @@
+#!/bin/bash
+#PJM -L rscgrp=b-batch-mig
+#PJM -L gpu=1
+#PJM -L elapse=01:00:00
+#PJM -L jobenv=singularity
+#PJM -o logs/ab_valle_runtime_precision_%j.out
+#PJM -e logs/ab_valle_runtime_precision_%j.err
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+mkdir -p logs exp/ab_valle_runtime_precision
+
+module load singularity-ce
+singularity exec --nv --bind "$HOME" "$HOME/latest.sif" \
+    bash "${SCRIPT_DIR}/ab_valle_runtime_precision.sh" "$@"
