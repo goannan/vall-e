@@ -34,7 +34,7 @@ fi
 
 export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 export PYTHONUNBUFFERED=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
 export OMP_NUM_THREADS=8
 
 CONFIG_PATH=${1:-"${WORK_DIR}/config_tts_native.json"}
