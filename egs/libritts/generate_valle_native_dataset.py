@@ -79,8 +79,8 @@ def parse_args():
     parser.add_argument(
         "--text-tokens",
         type=str,
-        default="data/tokenized_voicemark/unique_text_tokens.k2symbols",
-        help="Path to unique text tokens symbol table",
+        default="",
+        help="Path to unique text tokens symbol table (defaults to model checkpoint args.text_tokens)",
     )
     parser.add_argument(
         "--speechtokenizer-config",
@@ -166,7 +166,7 @@ def main():
     valle_model.eval()
 
     # 2. Text Collater & Text Tokenizer
-    text_tokens_file = args.text_tokens if os.path.exists(args.text_tokens) else model_args.text_tokens
+    text_tokens_file = args.text_tokens if (args.text_tokens and os.path.exists(args.text_tokens)) else model_args.text_tokens
     text_collater = get_text_token_collater(text_tokens_file)
     text_tokenizer = TextTokenizer(backend="espeak")
 
