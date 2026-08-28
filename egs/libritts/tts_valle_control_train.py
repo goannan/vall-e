@@ -674,18 +674,6 @@ class NeuMarkValleControlTrainer:
                         self.scheduler_generator.step()
                         self.scheduler_discriminator.step()
 
-                # GPU VRAM Monitoring
-                vram_info = {}
-                if torch.cuda.is_available():
-                    alloc_gb = torch.cuda.memory_allocated() / (1024 ** 3)
-                    max_alloc_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
-                    res_gb = torch.cuda.memory_reserved() / (1024 ** 3)
-                    vram_info = {
-                        "system/vram_allocated_gb": alloc_gb,
-                        "system/vram_max_peak_gb": max_alloc_gb,
-                        "system/vram_reserved_gb": res_gb,
-                    }
-
                 if steps % self.cfg.get("log_steps", 50) == 0 or steps in {1, 5, 10}:
                     log_dict = {
                         "train/total_loss": total_loss.item(),
@@ -698,7 +686,6 @@ class NeuMarkValleControlTrainer:
                         "train/fm_loss": loss_fm.item(),
                         "train/d_loss": loss_D.item(),
                     }
-                    log_dict.update(vram_info)
                     self.log(log_dict, step=steps)
 
                 # Validation Loop
