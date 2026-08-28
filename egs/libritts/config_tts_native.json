@@ -1,6 +1,6 @@
 {
-    "train_manifest": "data/tokenized_voicemark/cuts_train.jsonl.gz",
-    "valid_manifest": "data/tokenized_voicemark/cuts_dev.jsonl.gz",
+    "train_manifest": "data/tokenized_voicemark/cuts_train_valle_native.jsonl.gz",
+    "valid_manifest": "data/tokenized_voicemark/cuts_dev_valle_native.jsonl.gz",
     "results_folder": "exp/tts_native_neumark",
     "wavlm_checkpoint": "models/wavlm_large_finetune.pth",
     "sample_rate": 16000,
@@ -26,7 +26,7 @@
     "log_steps": 50,
     "save_steps": 5000,
     "val_steps": 1000,
-    "neumark_root": "../../../NeuMark",
+    "neumark_root": "/home/wu25/mrnas04home/projects/NeuMark",
     "neumark_config": "STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json",
     "neumark_st_checkpoint": "STmodels/pretrained_model/SpeechTokenizer.pt",
     "num_val_samples": 50,

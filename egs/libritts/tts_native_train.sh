@@ -4,10 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Conda environment activation
-CONDA_SH="$HOME/miniconda3/etc/profile.d/conda.sh"
-if [ -f "$CONDA_SH" ]; then
-    source "$CONDA_SH"
+# Activate voicemark environment (pyenv or conda)
+if [ -d "/home/wu25/mrnas04home/.pyenv/versions/voicemark/bin" ]; then
+    export PATH="/home/wu25/mrnas04home/.pyenv/versions/voicemark/bin:$PATH"
+elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
     conda activate voicemark || true
 fi
 
