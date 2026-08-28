@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=tts_native_wm
-#SBATCH --nodes=2
-#SBATCH --nodelist=compute07,mrcompute03
-#SBATCH --gres=gpu:4
+#SBATCH --nodes=1-2
+#SBATCH --nodelist=compute07,mrcompute03,mrcompute02
+#SBATCH --gpus=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH -t 14-00:00:00
@@ -34,27 +34,25 @@ export NCCL_SOCKET_IFNAME=eth0,eth
 
 CONFIG_PATH=${1:-"${WORK_DIR}/config_tts_native.json"}
 
-# Parse nodes and master endpoint
+# Parse nodes and master endpoint dynamically
 NODES_ARRAY=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 MASTER_NODE=${NODES_ARRAY[0]}
 MASTER_PORT=29500
 NUM_NODES=${#NODES_ARRAY[@]}
-GPUS_PER_NODE=4
-TOTAL_GPUS=$((NUM_NODES * GPUS_PER_NODE))
+TOTAL_GPUS=${SLURM_GPUS_ON_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 8)}
+TOTAL_JOB_GPUS=${SLURM_NTASKS_PER_NODE:-8}
 
 echo "=========================================================="
 echo " Starting NeuMark Multi-Node Multi-GPU Training           "
 echo " Time:            $(date)                                 "
 echo " Master Node:     ${MASTER_NODE}:${MASTER_PORT}           "
-echo " Total Nodes:     ${NUM_NODES} (${NODES_ARRAY[*]})       "
-echo " GPUs Per Node:   ${GPUS_PER_NODE}                        "
-echo " Total GPUs:      ${TOTAL_GPUS}                           "
+echo " Allocated Nodes: ${NUM_NODES} (${NODES_ARRAY[*]})       "
 echo " WorkingDir:      ${WORK_DIR}                             "
 echo " Config:          ${CONFIG_PATH}                          "
 echo "=========================================================="
 
 if [ "${NUM_NODES}" -gt 1 ]; then
-  echo "Launching Multi-Node Multi-GPU with srun & Accelerate..."
+  echo "Launching Multi-Node Training across ${NUM_NODES} nodes with 8 total GPUs..."
   srun bash -c "
     export PATH=/home/wu25/mrnas04home/.pyenv/versions/voicemark/bin:\$PATH
     export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
@@ -64,10 +62,11 @@ if [ "${NUM_NODES}" -gt 1 ]; then
     export NCCL_IB_DISABLE=1
     export NCCL_SOCKET_IFNAME=eth0,eth
     
+    LOCAL_GPUS=\$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 4)
     accelerate launch \
       --multi_gpu \
       --num_machines ${NUM_NODES} \
-      --num_processes ${TOTAL_GPUS} \
+      --num_processes 8 \
       --machine_rank \$SLURM_NODEID \
       --main_process_ip ${MASTER_NODE} \
       --main_process_port ${MASTER_PORT} \
@@ -77,8 +76,9 @@ if [ "${NUM_NODES}" -gt 1 ]; then
       tts_native_train.py --config '${CONFIG_PATH}'
   "
 else
-  echo "Launching Single-Node Multi-GPU Training (${GPUS_PER_NODE} GPUs)..."
-  accelerate launch     --multi_gpu     --num_processes "${GPUS_PER_NODE}"     --mixed_precision bf16     --dynamo_backend no     tts_native_train.py --config "${CONFIG_PATH}"
+  LOCAL_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 8)
+  echo "Launching Single-Node Multi-GPU Training (${LOCAL_GPUS} GPUs)..."
+  accelerate launch     --multi_gpu     --num_processes "${LOCAL_GPUS}"     --mixed_precision bf16     --dynamo_backend no     tts_native_train.py --config "${CONFIG_PATH}"
 fi
 
 echo "=========================================================="
