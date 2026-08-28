@@ -18,7 +18,7 @@
     "num_workers": 6,
     "cos_loss_lambda": 2.0,
     "adv_loss_lambda": 2.0,
-    "dec_loss_lambda": 1.0,
+    "dec_loss_lambda": 10.0,
     "vad_loss_lambda": 1.0,
     "utmos_loss_lambda": 2.0,
     "sim_loss_lambda": 2.0,
