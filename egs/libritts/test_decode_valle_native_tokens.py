@@ -190,7 +190,7 @@ def main():
             gt_duration = None
             if args.save_gt and cut.has_recording:
                 try:
-                    gt_audio_np = cut.load_audio()
+                    gt_audio_np = cut.recording.load_audio()
                     gt_audio = torch.from_numpy(gt_audio_np).float()
                     if cut.sampling_rate != 16000:
                         gt_audio = torchaudio.functional.resample(gt_audio, cut.sampling_rate, 16000)

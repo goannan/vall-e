@@ -49,16 +49,39 @@ class TTSNativeDataset(Dataset):
 
         # 3. Audio recording: [1, T_samples] (with resilient fallback if raw wavs are not colocated)
         try:
-            audio_np = cut.load_audio()
-            audio = torch.from_numpy(audio_np).float()
-            if cut.sampling_rate != self.sample_rate:
-                audio = torchaudio.functional.resample(audio, cut.sampling_rate, self.sample_rate)
+            if cut.has_recording:
+                audio_np = cut.recording.load_audio()
+                audio = torch.from_numpy(audio_np).float()
+                if cut.recording.sampling_rate != self.sample_rate:
+                    audio = torchaudio.functional.resample(audio, cut.recording.sampling_rate, self.sample_rate)
+            else:
+                audio = torch.zeros((1, codes.shape[-1] * self.downsample_rate), dtype=torch.float32)
         except Exception:
             # Reconstruct clean placeholder audio if raw LibriTTS directory is not downloaded on remote node
             audio = torch.zeros((1, codes.shape[-1] * self.downsample_rate), dtype=torch.float32)
 
-        # 4. Prompt audio uses the speaker reference recording
-        prompt_audio = audio.clone()
+        # 4. Prompt audio: resolve speaker reference recording (prompt wav or target speaker audio)
+        prompt_audio = None
+        p_id = cut.custom.get("prompt_cut_id", "") if cut.custom else ""
+        if p_id and cut.has_recording and len(cut.recording.sources) > 0:
+            try:
+                rec_source = cut.recording.sources[0].source
+                rec_path = Path(rec_source)
+                p_rec_id = p_id.rsplit("-", 1)[0] if "-" in p_id else p_id
+                parts = p_rec_id.split("_")
+                if len(parts) >= 4:
+                    spk, chap = parts[0], parts[1]
+                    p_wav_path = rec_path.parents[2] / spk / chap / f"{p_rec_id}.wav"
+                    if p_wav_path.exists():
+                        p_wav, p_sr = torchaudio.load(str(p_wav_path))
+                        if p_sr != self.sample_rate:
+                            p_wav = torchaudio.functional.resample(p_wav, p_sr, self.sample_rate)
+                        prompt_audio = p_wav
+            except Exception:
+                prompt_audio = None
+
+        if prompt_audio is None:
+            prompt_audio = audio.clone()
 
         return {
             "id": cut.id,
