@@ -30,7 +30,8 @@ export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
 export OMP_NUM_THREADS=4
 export NCCL_DEBUG=INFO
 export NCCL_IB_DISABLE=1
-export NCCL_SOCKET_IFNAME=eth0,eth
+export NCCL_SOCKET_IFNAME=^lo,docker0,eth2,eth3
+export GLOO_SOCKET_IFNAME=^lo,docker0,eth2,eth3
 
 CONFIG_PATH=${1:-"${WORK_DIR}/config_tts_native.json"}
 
@@ -58,7 +59,8 @@ if [ "${NUM_NODES}" -gt 1 ]; then
     export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
     export NCCL_DEBUG=INFO
     export NCCL_IB_DISABLE=1
-    export NCCL_SOCKET_IFNAME=eth0,eth
+    export NCCL_SOCKET_IFNAME=^lo,docker0,eth2,eth3
+export GLOO_SOCKET_IFNAME=^lo,docker0,eth2,eth3
     
     LOCAL_GPUS=\$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 4)
     accelerate launch \
