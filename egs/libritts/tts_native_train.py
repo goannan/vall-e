@@ -115,6 +115,7 @@ class NeuMarkTrainer:
         self.initial_lr = cfg.get("initial_learning_rate", 1e-6)
         self.num_warmup_steps = cfg.get("num_warmup_steps", 1000)
         self.val_steps = cfg.get("val_steps", 1000)
+        self.save_steps = cfg.get("save_steps", 5000)
         self.num_val_samples = cfg.get("num_val_samples", 50)
         self.grad_accum_steps = max(1, cfg.get("gradient_accumulation_steps", 1))
         self.seed = cfg.get("seed", 1234)
@@ -669,6 +670,10 @@ class NeuMarkTrainer:
                     log_dict.update(vram_info)
                     self.log(log_dict, step=steps)
 
+                # Periodic Checkpoint Saving
+                if steps > 0 and steps % self.save_steps == 0:
+                    self.save(steps, epoch)
+
                 # Validation Loop
                 if steps > 0 and steps % self.val_steps == 0:
                     self.validate(steps)
@@ -693,7 +698,7 @@ class NeuMarkTrainer:
     def save(self, steps: int, epoch: int, final: bool = False):
         if not self.is_main:
             return
-        prefix = "NeuMark_final" if final else f"NeuMark_epoch_{epoch:03d}"
+        prefix = "NeuMark_final" if final else f"NeuMark_step_{steps:07d}_epoch_{epoch:03d}"
         ckpt_path = self.results_folder / f"{prefix}.pt"
         pkg = dict(
             msg_processor=self.accelerator.get_state_dict(self.msg_processor),
