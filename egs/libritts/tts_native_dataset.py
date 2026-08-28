@@ -123,10 +123,13 @@ class TTSNativeDataset(Dataset):
 
         if audio is None:
             try:
-                audio_np = cut.load_audio()
-                audio = torch.from_numpy(audio_np).float()
-                if cut.sampling_rate != self.sample_rate:
-                    audio = torchaudio.functional.resample(audio, cut.sampling_rate, self.sample_rate)
+                if hasattr(cut, "recording") and cut.recording:
+                    audio_np = cut.recording.load_audio()
+                    audio = torch.from_numpy(audio_np).float()
+                    if cut.recording.sampling_rate != self.sample_rate:
+                        audio = torchaudio.functional.resample(audio, cut.recording.sampling_rate, self.sample_rate)
+                else:
+                    audio = torch.zeros((1, codes.shape[-1] * self.downsample_rate), dtype=torch.float32)
             except Exception:
                 # Placeholder fallback if raw audio not accessible
                 audio = torch.zeros((1, codes.shape[-1] * self.downsample_rate), dtype=torch.float32)
@@ -135,6 +138,7 @@ class TTSNativeDataset(Dataset):
         prompt_audio = None
         if hasattr(cut, "custom") and cut.custom and "prompt_cut_id" in cut.custom:
             prompt_id = cut.custom["prompt_cut_id"]
+            # A. Try prompt_map if pre-indexed
             if prompt_id in self.prompt_map:
                 try:
                     src, p_start, p_dur = self.prompt_map[prompt_id]
@@ -146,6 +150,24 @@ class TTSNativeDataset(Dataset):
                         p_start_sample = int(p_start * self.sample_rate)
                         p_num_samples = int(p_dur * self.sample_rate)
                         prompt_audio = p_audio[:, p_start_sample : p_start_sample + p_num_samples]
+                except Exception:
+                    pass
+
+            # B. Direct hierarchy resolution from target recording path if prompt_map is empty
+            if prompt_audio is None and hasattr(cut, "recording") and cut.recording and cut.recording.sources:
+                try:
+                    rec_source = cut.recording.sources[0].source
+                    rec_path = resolve_wav_path(rec_source) or Path(rec_source)
+                    p_rec_id = prompt_id.rsplit("-", 1)[0] if "-" in prompt_id else prompt_id
+                    parts = p_rec_id.split("_")
+                    if len(parts) >= 4:
+                        spk, chap = parts[0], parts[1]
+                        p_wav_path = rec_path.parents[2] / spk / chap / f"{p_rec_id}.wav"
+                        if p_wav_path.exists():
+                            p_wav, p_sr = torchaudio.load(str(p_wav_path))
+                            if p_sr != self.sample_rate:
+                                p_wav = torchaudio.functional.resample(p_wav, p_sr, self.sample_rate)
+                            prompt_audio = p_wav
                 except Exception:
                     pass
 

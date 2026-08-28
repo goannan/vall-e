@@ -132,7 +132,8 @@ class NeuMarkValleControlTrainer:
         self.lr = cfg.get("learning_rate", 5e-5)
         self.initial_lr = cfg.get("initial_learning_rate", 1e-6)
         self.num_warmup_steps = cfg.get("num_warmup_steps", 1000)
-        self.val_steps = cfg.get("val_steps", 5000)
+        self.val_steps = cfg.get("val_steps", 1000)
+        self.save_steps = cfg.get("save_steps", 10000)
         self.num_val_samples = cfg.get("num_val_samples", 50)
         self.grad_accum_steps = max(1, cfg.get("gradient_accumulation_steps", 1))
         self.seed = cfg.get("seed", 1234)
@@ -710,6 +711,10 @@ class NeuMarkValleControlTrainer:
                     for d in self.discriminators.values():
                         d.train()
 
+                # Periodic Checkpoint Saving
+                if steps > 0 and steps % self.save_steps == 0:
+                    self.save(steps, epoch)
+
                 self.steps += 1
                 steps = int(self.steps.item())
 
@@ -722,7 +727,12 @@ class NeuMarkValleControlTrainer:
     def save(self, steps: int, epoch: int, final: bool = False):
         if not self.is_main:
             return
-        prefix = "NeuMarkControl_final" if final else f"NeuMarkControl_epoch_{epoch:03d}"
+        if final:
+            prefix = "NeuMarkControl_final"
+        elif steps % self.save_steps == 0 and steps > 0:
+            prefix = f"NeuMarkControl_step_{steps:07d}"
+        else:
+            prefix = f"NeuMarkControl_epoch_{epoch:03d}"
         ckpt_path = self.results_folder / f"{prefix}.pt"
         pkg = dict(
             msg_processor=self.accelerator.get_state_dict(self.msg_processor),

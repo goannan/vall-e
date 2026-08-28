@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=tts_native_wm
+#SBATCH --job-name=tts_valle_control
 #SBATCH --nodes=1-3
 #SBATCH --nodelist=mrcompute02,mrcompute03,compute07
 #SBATCH --gres=gpu:4
@@ -33,7 +33,7 @@ export NCCL_IB_DISABLE=1
 export NCCL_SOCKET_IFNAME=^lo,docker0,eth2,eth3
 export GLOO_SOCKET_IFNAME=^lo,docker0,eth2,eth3
 
-CONFIG_PATH=${1:-"${WORK_DIR}/config_tts_native.json"}
+CONFIG_PATH=${1:-"${WORK_DIR}/config_tts_valle_control.json"}
 
 # Parse nodes and master endpoint dynamically
 NODES_ARRAY=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
@@ -44,7 +44,7 @@ GPUS_PER_NODE=4
 TOTAL_GPUS=$((NUM_NODES * GPUS_PER_NODE))
 
 echo "=========================================================="
-echo " Starting NeuMark Training                                "
+echo " Starting NeuMark Control Training                        "
 echo " Time:            $(date)                                 "
 echo " Master Endpoint: ${MASTER_NODE}:${MASTER_PORT}           "
 echo " Allocated Nodes: ${NUM_NODES} (${NODES_ARRAY[*]})       "
@@ -66,13 +66,13 @@ if [ "${NUM_NODES}" -gt 1 ]; then
     export NCCL_SOCKET_IFNAME=^lo,docker0,eth2,eth3
     export GLOO_SOCKET_IFNAME=^lo,docker0,eth2,eth3
     
-    accelerate launch       --multi_gpu       --num_machines ${NUM_NODES}       --num_processes ${TOTAL_GPUS}       --machine_rank \$SLURM_NODEID       --main_process_ip ${MASTER_NODE}       --main_process_port ${MASTER_PORT}       --same_network       --mixed_precision bf16       --dynamo_backend no       tts_native_train.py --config '${CONFIG_PATH}'
+    accelerate launch       --multi_gpu       --num_machines ${NUM_NODES}       --num_processes ${TOTAL_GPUS}       --machine_rank \$SLURM_NODEID       --main_process_ip ${MASTER_NODE}       --main_process_port ${MASTER_PORT}       --same_network       --mixed_precision bf16       --dynamo_backend no       tts_valle_control_train.py --config '${CONFIG_PATH}'
   "
 else
   echo "Launching Single-Node Multi-GPU Training (${TOTAL_GPUS} GPUs)..."
-  accelerate launch     --multi_gpu     --num_processes "${TOTAL_GPUS}"     --mixed_precision bf16     --dynamo_backend no     tts_native_train.py --config "${CONFIG_PATH}"
+  accelerate launch     --multi_gpu     --num_processes "${TOTAL_GPUS}"     --mixed_precision bf16     --dynamo_backend no     tts_valle_control_train.py --config "${CONFIG_PATH}"
 fi
 
 echo "=========================================================="
-echo " Training finished at $(date)                             "
+echo " Control Training finished at $(date)                     "
 echo "=========================================================="
