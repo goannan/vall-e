@@ -1,10 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=tts_native_wm
-#SBATCH --nodes=1-2
-#SBATCH --nodelist=compute07,mrcompute03,mrcompute02
-#SBATCH --gpus=8
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
+#SBATCH --nodes=1-4
+#SBATCH --ntasks=8
+#SBATCH --gpus-per-task=1
+#SBATCH --cpus-per-task=4
 #SBATCH -t 14-00:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
@@ -35,51 +34,38 @@ export NCCL_SOCKET_IFNAME=eth0,eth
 CONFIG_PATH=${1:-"${WORK_DIR}/config_tts_native.json"}
 
 # Parse nodes and master endpoint dynamically
-NODES_ARRAY=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
-MASTER_NODE=${NODES_ARRAY[0]}
+MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 MASTER_PORT=29500
-NUM_NODES=${#NODES_ARRAY[@]}
-TOTAL_GPUS=${SLURM_GPUS_ON_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 8)}
-TOTAL_JOB_GPUS=${SLURM_NTASKS_PER_NODE:-8}
+
+export MASTER_ADDR="${MASTER_ADDR}"
+export MASTER_PORT="${MASTER_PORT}"
 
 echo "=========================================================="
 echo " Starting NeuMark Multi-Node Multi-GPU Training           "
 echo " Time:            $(date)                                 "
-echo " Master Node:     ${MASTER_NODE}:${MASTER_PORT}           "
-echo " Allocated Nodes: ${NUM_NODES} (${NODES_ARRAY[*]})       "
+echo " Master Endpoint: ${MASTER_ADDR}:${MASTER_PORT}           "
+echo " Total Tasks:     ${SLURM_NTASKS:-8}                      "
+echo " Nodes Allocated: ${SLURM_JOB_NODELIST}                   "
 echo " WorkingDir:      ${WORK_DIR}                             "
 echo " Config:          ${CONFIG_PATH}                          "
 echo "=========================================================="
 
-if [ "${NUM_NODES}" -gt 1 ]; then
-  echo "Launching Multi-Node Training across ${NUM_NODES} nodes with 8 total GPUs..."
-  srun bash -c "
-    export PATH=/home/wu25/mrnas04home/.pyenv/versions/voicemark/bin:\$PATH
-    export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
-    export PYTHONUNBUFFERED=1
-    export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
-    export NCCL_DEBUG=INFO
-    export NCCL_IB_DISABLE=1
-    export NCCL_SOCKET_IFNAME=eth0,eth
-    
-    LOCAL_GPUS=\$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 4)
-    accelerate launch \
-      --multi_gpu \
-      --num_machines ${NUM_NODES} \
-      --num_processes 8 \
-      --machine_rank \$SLURM_NODEID \
-      --main_process_ip ${MASTER_NODE} \
-      --main_process_port ${MASTER_PORT} \
-      --same_network \
-      --mixed_precision bf16 \
-      --dynamo_backend no \
-      tts_native_train.py --config '${CONFIG_PATH}'
-  "
-else
-  LOCAL_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 8)
-  echo "Launching Single-Node Multi-GPU Training (${LOCAL_GPUS} GPUs)..."
-  accelerate launch     --multi_gpu     --num_processes "${LOCAL_GPUS}"     --mixed_precision bf16     --dynamo_backend no     tts_native_train.py --config "${CONFIG_PATH}"
-fi
+srun bash -c "
+  export PATH=/home/wu25/mrnas04home/.pyenv/versions/voicemark/bin:\$PATH
+  export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+  export PYTHONUNBUFFERED=1
+  export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+  export NCCL_DEBUG=INFO
+  export NCCL_IB_DISABLE=1
+  export NCCL_SOCKET_IFNAME=eth0,eth
+  export MASTER_ADDR=${MASTER_ADDR}
+  export MASTER_PORT=${MASTER_PORT}
+  export RANK=\$SLURM_PROCID
+  export LOCAL_RANK=\$SLURM_LOCALID
+  export WORLD_SIZE=\$SLURM_NTASKS
+
+  python3 tts_native_train.py --config '${CONFIG_PATH}'
+"
 
 echo "=========================================================="
 echo " Training finished at $(date)                             "
