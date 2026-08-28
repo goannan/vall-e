@@ -5,7 +5,7 @@
     "wavlm_checkpoint": "models/wavlm_large_finetune.pth",
     "sample_rate": 16000,
     "batch_size": 2,
-    "epochs": 30,
+    "epochs": 10,
     "learning_rate": 5e-05,
     "initial_learning_rate": 1e-06,
     "num_warmup_steps": 1000,
