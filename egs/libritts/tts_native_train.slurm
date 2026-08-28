@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=tts_native_wm
-#SBATCH --nodes=1-2
-#SBATCH --nodelist=mrcompute03,compute07
+#SBATCH --nodes=1-3
+#SBATCH --nodelist=mrcompute02,mrcompute03,compute07
 #SBATCH --gres=gpu:4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
