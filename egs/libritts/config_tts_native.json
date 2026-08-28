@@ -24,7 +24,7 @@
     "sim_loss_lambda": 2.0,
     "asr_loss_lambda": 2.0,
     "log_steps": 50,
-    "save_steps": 5000,
+    "save_steps": 10000,
     "val_steps": 1000,
     "neumark_root": "/home/wu25/mrnas04home/projects/NeuMark",
     "neumark_config": "STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json",
