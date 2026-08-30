@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=eval_wm_test
 #SBATCH --nodes=1
+#SBATCH --nodelist=mrcompute02,mrcompute03,compute07
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
