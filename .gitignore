@@ -20,3 +20,6 @@ egs/libritts/logs/
 *.out
 egs/*/models/
 egs/*/logs/
+
+synthesized_data/
+egs/*/synthesized_data/

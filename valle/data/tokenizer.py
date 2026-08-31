@@ -670,8 +670,8 @@ class AudioTokenizer:
             else:
                 wav_for_mel = wav
             pad_need = int((self._h.n_fft - self._h.hop_size) / 2)
-            if wav_for_mel.shape[-1] <= pad_need:
-                return None
+            if wav_for_mel.shape[-1] <= pad_need * 2:
+                wav_for_mel = torch.nn.functional.pad(wav_for_mel, (0, max(1600, pad_need * 2 - wav_for_mel.shape[-1] + 1600)))
             mel = mel_spectrogram(
                 wav_for_mel,
                 self._h.n_fft,

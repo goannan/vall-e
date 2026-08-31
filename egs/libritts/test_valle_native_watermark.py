@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026
-# Standalone Benchmark Evaluation Script for VALL-E Native Watermarked TTS
-# Evaluates on full/subset test dataset with exact validation metric tables
+# Standalone Benchmark Evaluation Script for VALL-E Native / NeuMark Watermarked TTS
+# Evaluates on full/subset test dataset (LibriTTS and SeedTTS) with exact validation metric tables,
+# ROC-AUC, TPR@0.1%FPR, Embedding Overhead (ms/s), Detection Latency (ms/s), UTMOS, SIM, WER, CER.
 
 import argparse
 import csv
@@ -9,9 +10,10 @@ import json
 import logging
 import os
 import sys
+import time
 import types
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from unittest.mock import MagicMock
 
 # 1. Clean Mocks for k2 / kaldialign to avoid missing optional dependencies
@@ -49,19 +51,19 @@ def find_neumark_root(hint: Optional[str] = None) -> Path:
 
 NEUMARK_ROOT = find_neumark_root()
 for p in [str(PROJECT_DIR), str(SCRIPT_DIR), str(NEUMARK_ROOT), str(NEUMARK_ROOT / "train")]:
-    if p not in sys.path:
+    if p not in sys.path and os.path.exists(p):
         sys.path.insert(0, p)
 
 from STmodels.model import SpeechTokenizer
 from models import WMEmbedder, WMDetector
-from tts_native_dataset import get_tts_native_dataloader
 from tts_native_attacks import (
     get_validation_attack_suite,
     format_full_validation_table,
     release_codec_models,
+    compute_wer_cer,
+    compute_auc_and_tpr_at_fpr,
 )
 from tts_native_loss import UTMOSLoss, SpeakerSimLoss, ASRLoss
-from tts_native_attacks import compute_wer_cer
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -72,25 +74,19 @@ logging.basicConfig(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Full Benchmark Evaluation of VALL-E Native Watermarked TTS on Test Dataset"
+        description="Benchmark Evaluation of VALL-E Native / NeuMark Watermark on Test Datasets"
     )
     parser.add_argument(
         "--manifest",
         type=str,
-        default="data/tokenized_voicemark/cuts_test_valle_native.jsonl.gz",
-        help="Path to test cuts manifest (.jsonl.gz)",
+        default="synthesized_data/libriTTS",
+        help="Path to tokenized cuts manifest (.jsonl.gz) or synthesized dataset directory",
     )
     parser.add_argument(
-        "--watermark-checkpoint",
-        type=str,
-        default="exp/tts_native_neumark/20260829-003157/NeuMark_step_0020000_epoch_001.pt",
-        help="Path to trained NeuMark watermark checkpoint (.pt)",
-    )
-    parser.add_argument(
-        "--neumark-root",
+        "--output-dir",
         type=str,
         default=None,
-        help="Path to NeuMark repository root directory",
+        help="Directory to save evaluation reports, tables, and audio samples",
     )
     parser.add_argument(
         "--st-config",
@@ -102,7 +98,13 @@ def parse_args():
         "--st-checkpoint",
         type=str,
         default=None,
-        help="Path to SpeechTokenizer weights (.pt)",
+        help="Path to SpeechTokenizer pt checkpoint",
+    )
+    parser.add_argument(
+        "--watermark-model",
+        type=str,
+        default=None,
+        help="Path to NeuMark / TTS-Native trained pt checkpoint",
     )
     parser.add_argument(
         "--wavlm-checkpoint",
@@ -111,28 +113,22 @@ def parse_args():
         help="Path to WavLM checkpoint for Speaker Similarity",
     )
     parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="exp/eval_test_step_20000",
-        help="Directory to save evaluation reports, tables, and audio samples",
-    )
-    parser.add_argument(
         "--num-samples",
         type=int,
         default=-1,
-        help="Number of test samples to evaluate (-1 for ALL samples in manifest)",
+        help="Number of test samples to evaluate (-1 for ALL samples)",
     )
     parser.add_argument(
         "--save-audio-samples",
         type=int,
-        default=10,
-        help="Number of audio samples to save for qualitative listening (clean, wm, prompt)",
+        default=20,
+        help="Number of audio samples to save (clean, wm, prompt)",
     )
     parser.add_argument(
         "--device",
         type=str,
         default="cuda:0" if torch.cuda.is_available() else "cpu",
-        help="Device for inference (e.g. cuda:0, cuda:1, cpu)",
+        help="Device for inference (e.g. cuda:0, cpu)",
     )
     parser.add_argument(
         "--seed",
@@ -144,39 +140,47 @@ def parse_args():
 
 
 def main():
-    os.chdir(SCRIPT_DIR)
     args = parse_args()
     torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
     device = torch.device(args.device)
+    manifest_path = Path(args.manifest).resolve()
 
-    # 1. Resolve Paths
-    neumark_root = find_neumark_root(args.neumark_root)
-    manifest_path = Path(args.manifest) if Path(args.manifest).is_absolute() else (SCRIPT_DIR / args.manifest)
-    wm_ckpt_path = Path(args.watermark_checkpoint) if Path(args.watermark_checkpoint).is_absolute() else (SCRIPT_DIR / args.watermark_checkpoint)
-    wavlm_path = Path(args.wavlm_checkpoint) if Path(args.wavlm_checkpoint).is_absolute() else (SCRIPT_DIR / args.wavlm_checkpoint)
-    
-    st_cfg_path = Path(args.st_config) if args.st_config else (neumark_root / "STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json")
-    st_ckpt_path = Path(args.st_checkpoint) if args.st_checkpoint else (neumark_root / "STmodels/pretrained_model/SpeechTokenizer.pt")
-
-    out_dir = Path(args.output_dir) if Path(args.output_dir).is_absolute() else (SCRIPT_DIR / args.output_dir)
+    if args.output_dir is None:
+        out_dir = SCRIPT_DIR / "exp" / "eval_test_native_full"
+    else:
+        out_dir = Path(args.output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     audio_out_dir = out_dir / "audio_samples"
-    if args.save_audio_samples > 0:
-        audio_out_dir.mkdir(parents=True, exist_ok=True)
+    audio_out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Resolve Checkpoint Paths
+    st_cfg_path = Path(args.st_config) if args.st_config else NEUMARK_ROOT / "STmodels/pretrained_model/speechtokenizer_hubert_avg_config.json"
+    st_ckpt_path = Path(args.st_checkpoint) if args.st_checkpoint else NEUMARK_ROOT / "STmodels/pretrained_model/SpeechTokenizer.pt"
+    if not st_cfg_path.is_absolute():
+        st_cfg_path = (SCRIPT_DIR / st_cfg_path).resolve()
+    if not st_ckpt_path.is_absolute():
+        st_ckpt_path = (SCRIPT_DIR / st_ckpt_path).resolve()
+
+    wm_ckpt_path = Path(args.watermark_model) if args.watermark_model else SCRIPT_DIR / "genkai_models/NeuMark_valle_v2.pt"
+    if not wm_ckpt_path.is_absolute():
+        wm_ckpt_path = (SCRIPT_DIR / wm_ckpt_path).resolve()
+
+    wavlm_path = Path(args.wavlm_checkpoint)
+    if not wavlm_path.is_absolute():
+        wavlm_path = (SCRIPT_DIR / wavlm_path).resolve()
 
     logging.info("=" * 75)
-    logging.info(" VALL-E Native Watermark Test Benchmark Evaluation ")
+    logging.info(" Benchmark Evaluation for VALL-E Native / NeuMark Watermark on Test Set ")
     logging.info(f" Test Manifest:       {manifest_path}")
-    logging.info(f" Watermark Model:     {wm_ckpt_path}")
     logging.info(f" SpeechTokenizer:     {st_ckpt_path}")
+    logging.info(f" Watermark Model:     {wm_ckpt_path}")
     logging.info(f" WavLM Model:         {wavlm_path}")
     logging.info(f" Output Directory:    {out_dir}")
     logging.info(f" Device:              {device}")
     logging.info("=" * 75)
 
-    if not manifest_path.exists():
-        logging.error(f"Manifest file not found: {manifest_path}")
-        sys.exit(1)
     if not wm_ckpt_path.exists():
         logging.error(f"Watermark checkpoint not found: {wm_ckpt_path}")
         sys.exit(1)
@@ -193,12 +197,19 @@ def main():
     detector = WMDetector(input_channels=1024, nbits=16, nchunk_size=4).to(device)
 
     wm_pkg = torch.load(str(wm_ckpt_path), map_location="cpu")
-    msg_processor.load_state_dict(wm_pkg["msg_processor"])
-    detector.load_state_dict(wm_pkg["detector"])
+    if "msg_processor" in wm_pkg:
+        msg_processor.load_state_dict(wm_pkg["msg_processor"])
+        detector.load_state_dict(wm_pkg["detector"])
+    elif "model" in wm_pkg:
+        msg_processor.load_state_dict(wm_pkg["model"]["msg_processor"])
+        detector.load_state_dict(wm_pkg["model"]["detector"])
+    elif "embedder" in wm_pkg:
+        msg_processor.load_state_dict(wm_pkg["embedder"])
+        detector.load_state_dict(wm_pkg["detector"])
     msg_processor.eval()
     detector.eval()
 
-    ckpt_step = wm_pkg.get("steps", 20000)
+    ckpt_step = wm_pkg.get("steps", wm_pkg.get("step", 20000))
     ckpt_epoch = wm_pkg.get("epoch", 1)
     logging.info(f"Watermark checkpoint loaded successfully! (Trained for {ckpt_step} steps, epoch {ckpt_epoch})")
 
@@ -208,21 +219,60 @@ def main():
     asr_loss = ASRLoss(device=str(device))
     val_attacks = get_validation_attack_suite(sample_rate=16000)
 
-    # 3. Load Dataloader
-    logging.info(f"[4/4] Loading Test Cuts Dataloader from {manifest_path}...")
-    test_dl = get_tts_native_dataloader(
-        manifest_path=str(manifest_path),
-        batch_size=1,
-        shuffle=False,
-        num_workers=2,
-        max_duration=20.0,
-    )
-    total_test_samples = len(test_dl)
+    # 3. Load Dataset
+    logging.info(f"[4/4] Loading Test Items from {manifest_path}...")
+    items = []
+    if manifest_path.is_dir():
+        meta_json = manifest_path / "metadata.json"
+        meta_csv = manifest_path / "metadata.csv"
+        if meta_json.exists():
+            with open(meta_json, "r", encoding="utf-8") as f:
+                records = json.load(f).get("records", [])
+                for r in records:
+                    c_p = manifest_path / r["clean_tts_relpath"] if "clean_tts_relpath" in r else Path(r["clean_tts_wav"])
+                    p_p = manifest_path / r["prompt_relpath"] if "prompt_relpath" in r else Path(r["prompt_wav"])
+                    items.append({
+                        "cut_id": r.get("utt_id", str(r.get("sample_idx"))),
+                        "text": r.get("text", ""),
+                        "clean_path": c_p,
+                        "prompt_path": p_p,
+                    })
+        elif meta_csv.exists():
+            with open(meta_csv, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for r in reader:
+                    c_p = manifest_path / r["clean_tts_relpath"] if "clean_tts_relpath" in r else Path(r["clean_tts_wav"])
+                    p_p = manifest_path / r["prompt_relpath"] if "prompt_relpath" in r else Path(r["prompt_wav"])
+                    items.append({
+                        "cut_id": r.get("utt_id", r.get("sample_idx", "")),
+                        "text": r.get("text", ""),
+                        "clean_path": c_p,
+                        "prompt_path": p_p,
+                    })
+    else:
+        # Tokenized cuts fallback
+        from tts_native_dataset import get_tts_native_dataloader
+        test_dl = get_tts_native_dataloader(
+            manifest_path=str(manifest_path),
+            batch_size=1,
+            shuffle=False,
+            num_workers=2,
+            max_duration=20.0,
+        )
+        for b in test_dl:
+            items.append({
+                "cut_id": b["ids"][0],
+                "text": b["texts"][0],
+                "batch": b,
+            })
+
+    total_test_samples = len(items)
     num_eval = total_test_samples if args.num_samples <= 0 else min(args.num_samples, total_test_samples)
-    logging.info(f"Total cuts in test manifest: {total_test_samples} | Samples to evaluate: {num_eval}")
+    logging.info(f"Total test samples: {total_test_samples} | Samples to evaluate: {num_eval}")
 
     # 4. Evaluation Loop
     results = {}
+    attack_scores = {}
     for cat, name, detail, _ in val_attacks:
         key = name if cat == "DSP" else f"{name} {detail}"
         results[key] = {
@@ -235,62 +285,90 @@ def main():
             "pos_frames": 0,
             "neg_matches": 0,
             "neg_frames": 0,
+            "roc_auc": 0.5,
+            "tpr_at_001_fpr": 0.0,
         }
+        attack_scores[key] = {"pos_det_scores": [], "neg_det_scores": [], "pos_wm_scores": [], "neg_wm_scores": []}
 
     clean_utmos_list, wm_utmos_list = [], []
     clean_sim_list, wm_sim_list = [], []
     clean_wer_list, wm_wer_list = [], []
     clean_cer_list, wm_cer_list = [], []
-
     sample_audio_records = []
+
+    total_audio_duration = 0.0
+    total_embed_time = 0.0
+    total_detect_time = 0.0
 
     logging.info("=" * 75)
     logging.info(f" Starting Full Benchmark Evaluation on {num_eval} Test Samples...")
     logging.info("=" * 75)
 
     with torch.no_grad():
-        for i, batch in enumerate(tqdm(test_dl, total=num_eval, desc="Evaluating Test Cuts", ncols=100)):
-            if i >= num_eval:
-                break
+        for i in tqdm(range(num_eval), desc="Evaluating Native / NeuMark", ncols=100):
+            item = items[i]
+            cut_id = item["cut_id"]
+            ref_text = item["text"]
 
-            codes = batch["codes"].to(device)  # [1, 8, T]
-            real_audio = batch["audio"].to(device)  # [1, 1, T_samples]
-            prompt_audio = batch["prompt_audio"].to(device)  # [1, 1, T_p]
-            texts = batch["texts"]
-            cut_ids = batch["ids"]
-            cut_id = cut_ids[0] if cut_ids else f"sample_{i:04d}"
-            ref_text = texts[0] if texts else ""
+            if "clean_path" in item:
+                c_wav, c_sr = torchaudio.load(str(item["clean_path"]))
+                if c_sr != 16000:
+                    c_wav = torchaudio.functional.resample(c_wav, c_sr, 16000)
+                if c_wav.shape[0] > 1:
+                    c_wav = c_wav.mean(dim=0, keepdim=True)
+                clean_audio = c_wav.unsqueeze(0).to(device)
 
-            batch_size = codes.size(0)
-            # Deterministic per-sample 16-bit message for standard benchmark verification
-            sample_seed = (args.seed + i * 17) % (2**31 - 1)
-            torch.manual_seed(sample_seed)
-            message = torch.randint(0, 2, (batch_size, 16), dtype=torch.int64, device=device)
+                p_wav, p_sr = torchaudio.load(str(item["prompt_path"]))
+                if p_sr != 16000:
+                    p_wav = torchaudio.functional.resample(p_wav, p_sr, 16000)
+                if p_wav.shape[0] > 1:
+                    p_wav = p_wav.mean(dim=0, keepdim=True)
+                prompt_audio = p_wav.unsqueeze(0).to(device)
 
-            # RVQ decode codes layer-wise: [8, 1, T] -> 8 tensors of [1, 1024, T]
-            codes_qbt = codes.permute(1, 0, 2).contiguous() if codes.shape[1] == 8 else codes
-            quantized_layers = [generator.quantizer.decode(codes_qbt[k : k + 1], st=k) for k in range(8)]
+                # Encode with SpeechTokenizer to get 8 RVQ layers
+                codes = generator.encode(clean_audio)
+                codes_qbt = codes.permute(1, 0, 2).contiguous() if codes.shape[1] == 8 else codes
+                quantized_layers = [generator.quantizer.decode(codes_qbt[k : k + 1], st=k) for k in range(8)]
+            else:
+                b = item["batch"]
+                codes = b["codes"].to(device)
+                clean_audio = generator.decode(codes)
+                prompt_audio = b["prompt_audio"].to(device)
+                codes_qbt = codes.permute(1, 0, 2).contiguous() if codes.shape[1] == 8 else codes
+                quantized_layers = [generator.quantizer.decode(codes_qbt[k : k + 1], st=k) for k in range(8)]
 
-            # 1. Clean TTS Reconstruction (without watermark)
-            z_clean = sum(quantized_layers)
-            clean_audio = generator.decoder(z_clean)
+            audio_dur = clean_audio.shape[-1] / 16000.0
+            total_audio_duration += audio_dur
 
-            # 2. Watermarked TTS Synthesis
+            # 16-bit random message
+            message = torch.randint(0, 2, (1, 16), device=device)
+            msg_np = message.cpu().numpy().squeeze()
+
+            # Measure Embedding Time (Layer-wise injection exactly matching training)
+            t0 = time.perf_counter()
             watermarked_layers = [msg_processor(q, message) for q in quantized_layers]
             z_wm = sum(watermarked_layers)
             wm_audio = generator.decoder(z_wm)
+            t_embed = time.perf_counter() - t0
+            total_embed_time += t_embed
 
-            # 3. UTMOS Evaluation (Clean vs WM)
-            if getattr(utmos_loss, "model", None) is not None:
-                try:
-                    c_u = utmos_loss.model(clean_audio.squeeze(1), 16000).mean().item()
-                    w_u = utmos_loss.model(wm_audio.squeeze(1), 16000).mean().item()
-                    clean_utmos_list.append(c_u)
-                    wm_utmos_list.append(w_u)
-                except Exception:
-                    pass
+            # Match lengths
+            if wm_audio.shape[-1] != clean_audio.shape[-1]:
+                if wm_audio.shape[-1] > clean_audio.shape[-1]:
+                    wm_audio = wm_audio[..., :clean_audio.shape[-1]]
+                else:
+                    pad_amt = clean_audio.shape[-1] - wm_audio.shape[-1]
+                    wm_audio = torch.nn.functional.pad(wm_audio, (0, pad_amt))
 
-            # 4. Speaker SIM Evaluation (Clean vs WM against Speaker Prompt)
+            # Audio Quality Metrics
+            try:
+                c_u = utmos_loss.model(clean_audio.squeeze(1), 16000).mean().item()
+                w_u = utmos_loss.model(wm_audio.squeeze(1), 16000).mean().item()
+                clean_utmos_list.append(c_u)
+                wm_utmos_list.append(w_u)
+            except Exception:
+                pass
+
             try:
                 c_s = sim_loss.get_similarity(clean_audio, prompt_audio, 16000)
                 w_s = sim_loss.get_similarity(wm_audio, prompt_audio, 16000)
@@ -299,59 +377,69 @@ def main():
             except Exception:
                 pass
 
-            # 5. ASR WER / CER Evaluation (Clean vs WM)
-            if getattr(asr_loss, "model", None) is not None:
+            if getattr(asr_loss, "model", None) is not None and ref_text:
                 try:
                     c_hyps = asr_loss.decode_greedy(clean_audio, 16000)
                     w_hyps = asr_loss.decode_greedy(wm_audio, 16000)
-                    for ref_t, c_h, w_h in zip(texts, c_hyps, w_hyps):
-                        c_wer, c_cer = compute_wer_cer(ref_t, c_h)
-                        w_wer, w_cer = compute_wer_cer(ref_t, w_h)
-                        clean_wer_list.append(c_wer)
-                        clean_cer_list.append(c_cer)
-                        wm_wer_list.append(w_wer)
-                        wm_cer_list.append(w_cer)
+                    c_wer, c_cer = compute_wer_cer(ref_text, c_hyps[0])
+                    w_wer, w_cer = compute_wer_cer(ref_text, w_hyps[0])
+                    clean_wer_list.append(c_wer)
+                    clean_cer_list.append(c_cer)
+                    wm_wer_list.append(w_wer)
+                    wm_cer_list.append(w_cer)
                 except Exception:
                     pass
 
-            # 6. Robustness Evaluation across DSP + Codec attacks (both WM and Clean)
+            # Attacks & Robustness Evaluation
             for cat, name, detail, atk_fn in val_attacks:
                 key = name if cat == "DSP" else f"{name} {detail}"
-
-                # A. Watermarked Audio (+ Attack) -> Evaluates Bit Extraction & True Positives (TP)
                 try:
                     attacked_wm = atk_fn(wm_audio)
                 except Exception:
                     attacked_wm = wm_audio
 
-                emb_wm = generator.forward_feature(attacked_wm)
-                logits_wm, _ = detector(emb_wm)
-                _, pred_bits, _ = detector.detect_watermark(emb_wm)
-                bit_correct = (pred_bits.long() == message.long()).sum().item()
-                tp_correct = (logits_wm > 0.0).sum().item()
+                t_det_0 = time.perf_counter()
+                feat_atk_wm = generator.forward_feature(attacked_wm)
+                prob_wm_t, msg_out_wm, _ = detector.detect_watermark(feat_atk_wm)
+                total_detect_time += (time.perf_counter() - t_det_0)
 
-                # B. Clean Unwatermarked Audio (+ Attack) -> Evaluates True Negatives (TN)
+                prob_wm = float(prob_wm_t.mean().item())
+                msg_pred_wm = msg_out_wm.squeeze(0).cpu().numpy().tolist()
+                bit_matches = sum(int(c1) == int(c2) for c1, c2 in zip(msg_pred_wm, msg_np))
+                tp_flag = 1 if prob_wm >= 0.5 else 0
+
                 try:
                     attacked_clean = atk_fn(clean_audio)
                 except Exception:
                     attacked_clean = clean_audio
 
-                emb_clean = generator.forward_feature(attacked_clean)
-                logits_clean, _ = detector(emb_clean)
-                tn_correct = (logits_clean <= 0.0).sum().item()
+                t_det_1 = time.perf_counter()
+                feat_atk_cl = generator.forward_feature(attacked_clean)
+                prob_cl_t, msg_out_cl, _ = detector.detect_watermark(feat_atk_cl)
+                total_detect_time += (time.perf_counter() - t_det_1)
 
-                # C. Accumulate Statistics
-                results[key]["bit_matches"] += bit_correct
-                results[key]["total_bits"] += message.numel()
-                results[key]["pos_matches"] += tp_correct
-                results[key]["pos_frames"] += logits_wm.numel()
-                results[key]["neg_matches"] += tn_correct
-                results[key]["neg_frames"] += logits_clean.numel()
+                prob_cl = float(prob_cl_t.mean().item())
+                msg_pred_cl = msg_out_cl.squeeze(0).cpu().numpy().tolist()
+                cl_bit_matches = sum(int(c1) == int(c2) for c1, c2 in zip(msg_pred_cl, msg_np))
+                clean_tp_flag = 1 if prob_cl >= 0.5 else 0
+                tn_flag = 1 - clean_tp_flag
 
-            # Optional: Save audio samples for listening tests
+                results[key]["bit_matches"] += bit_matches
+                results[key]["total_bits"] += 16
+                results[key]["pos_matches"] += tp_flag
+                results[key]["pos_frames"] += 1
+                results[key]["neg_matches"] += tn_flag
+                results[key]["neg_frames"] += 1
+
+                attack_scores[key]["pos_det_scores"].append(prob_wm)
+                attack_scores[key]["neg_det_scores"].append(prob_cl)
+                attack_scores[key]["pos_wm_scores"].append(bit_matches / 16.0)
+                attack_scores[key]["neg_wm_scores"].append(cl_bit_matches / 16.0)
+
+            # Save Sample Audio Files
             if i < args.save_audio_samples:
                 c_wav_p = audio_out_dir / f"sample_{i:03d}_{cut_id}_clean_tts.wav"
-                w_wav_p = audio_out_dir / f"sample_{i:03d}_{cut_id}_watermarked.wav"
+                w_wav_p = audio_out_dir / f"sample_{i:03d}_{cut_id}_native_wm.wav"
                 p_wav_p = audio_out_dir / f"sample_{i:03d}_{cut_id}_prompt.wav"
                 torchaudio.save(str(c_wav_p), clean_audio.squeeze(0).cpu(), 16000)
                 torchaudio.save(str(w_wav_p), wm_audio.squeeze(0).cpu(), 16000)
@@ -364,36 +452,74 @@ def main():
                     "clean_wav": str(c_wav_p.name),
                     "watermarked_wav": str(w_wav_p.name),
                     "prompt_wav": str(p_wav_p.name),
-                    "duration_sec": clean_audio.shape[-1] / 16000.0,
+                    "duration_sec": audio_dur,
                 })
 
-    # 5. Compute Summary Metrics
+            if (i + 1) % 25 == 0:
+                torch.cuda.empty_cache()
+                import gc
+                gc.collect()
+
+    # 5. Compute Final Metrics & Dual AUC (Detection & Bit-Matching Extraction)
     summary = {}
     csv_rows = []
+    all_det_true, all_det_scores = [], []
+    all_wm_true, all_wm_scores = [], []
+
     for key, stats in results.items():
         bit_acc = stats["bit_matches"] / max(1, stats["total_bits"])
         pos_acc = stats["pos_matches"] / max(1, stats["pos_frames"])
         neg_acc = stats["neg_matches"] / max(1, stats["neg_frames"])
-        det_acc = (stats["pos_matches"] + stats["neg_matches"]) / max(1, stats["pos_frames"] + stats["neg_frames"])
+        detect_acc = 0.5 * (pos_acc + neg_acc)
+
+        # 1. Detection ROC-AUC & TPR
+        pos_d = attack_scores[key]["pos_det_scores"]
+        neg_d = attack_scores[key]["neg_det_scores"]
+        y_det_true = [0] * len(neg_d) + [1] * len(pos_d)
+        y_det_scores = neg_d + pos_d
+        all_det_true.extend(y_det_true)
+        all_det_scores.extend(y_det_scores)
+        det_auc, det_tpr_001 = compute_auc_and_tpr_at_fpr(y_det_true, y_det_scores, target_fpr=0.001)
+
+        # 2. WM Bit-Matching Extraction ROC-AUC & TPR
+        pos_w = attack_scores[key]["pos_wm_scores"]
+        neg_w = attack_scores[key]["neg_wm_scores"]
+        y_wm_true = [0] * len(neg_w) + [1] * len(pos_w)
+        y_wm_scores = neg_w + pos_w
+        all_wm_true.extend(y_wm_true)
+        all_wm_scores.extend(y_wm_scores)
+        wm_auc, wm_tpr_001 = compute_auc_and_tpr_at_fpr(y_wm_true, y_wm_scores, target_fpr=0.001)
+
         summary[key] = {
             "category": stats["category"],
             "family": stats["family"],
             "bitrate": stats["bitrate"],
+            "detect_acc": detect_acc,
+            "det_roc_auc": det_auc,
+            "det_tpr_at_001_fpr": det_tpr_001,
             "bit_acc": bit_acc,
-            "pos_acc": pos_acc,
-            "neg_acc": neg_acc,
-            "detect_acc": det_acc,
+            "wm_roc_auc": wm_auc,
+            "wm_tpr_at_001_fpr": wm_tpr_001,
+            "tpr": pos_acc,
+            "tnr": neg_acc,
         }
         csv_rows.append({
             "Attack": key,
             "Category": stats["category"],
             "Family": stats["family"],
-            "Bitrate/Detail": stats["bitrate"],
-            "Bit_Accuracy": f"{bit_acc * 100:.2f}%",
-            "Detection_Accuracy": f"{det_acc * 100:.2f}%",
-            "Positive_Accuracy_TP": f"{pos_acc * 100:.2f}%",
-            "Negative_Accuracy_TN": f"{neg_acc * 100:.2f}%",
+            "Bitrate": stats["bitrate"],
+            "Detect_Accuracy": f"{detect_acc:.4f}",
+            "Det_ROC_AUC": f"{det_auc:.4f}",
+            "Det_TPR_at_001_FPR": f"{det_tpr_001:.4f}",
+            "WM_Bit_Accuracy": f"{bit_acc:.4f}",
+            "WM_ROC_AUC": f"{wm_auc:.4f}",
+            "WM_TPR_at_001_FPR": f"{wm_tpr_001:.4f}",
+            "TPR": f"{pos_acc:.4f}",
+            "TNR": f"{neg_acc:.4f}",
         })
+
+    overall_det_auc, overall_det_tpr_001 = compute_auc_and_tpr_at_fpr(all_det_true, all_det_scores, target_fpr=0.001)
+    overall_wm_auc, overall_wm_tpr_001 = compute_auc_and_tpr_at_fpr(all_wm_true, all_wm_scores, target_fpr=0.001)
 
     c_ut = sum(clean_utmos_list) / max(1, len(clean_utmos_list)) if clean_utmos_list else 0.0
     w_ut = sum(wm_utmos_list) / max(1, len(wm_utmos_list)) if wm_utmos_list else 0.0
@@ -404,31 +530,37 @@ def main():
     c_cer = sum(clean_cer_list) / max(1, len(clean_cer_list)) if clean_cer_list else 0.0
     w_cer = sum(wm_cer_list) / max(1, len(wm_cer_list)) if wm_cer_list else 0.0
 
+    embed_overhead_ms_per_sec = (total_embed_time / max(1e-5, total_audio_duration)) * 1000.0
+    num_attacks = len(val_attacks)
+    detect_latency_ms_per_sec = (total_detect_time / max(1e-5, total_audio_duration * num_attacks * 2)) * 1000.0
+
     quality_metrics = {
         "clean_utmos": c_ut, "wm_utmos": w_ut,
         "clean_sim": c_sim, "wm_sim": w_sim,
         "clean_wer": c_wer, "wm_wer": w_wer,
         "clean_cer": c_cer, "wm_cer": w_cer,
+        "embed_overhead_ms_per_sec": embed_overhead_ms_per_sec,
+        "detect_latency_ms_per_sec": detect_latency_ms_per_sec,
+        "overall_det_roc_auc": overall_det_auc, "overall_wm_roc_auc": overall_wm_auc,
+        "overall_det_tpr_at_001_fpr": overall_det_tpr_001, "overall_wm_tpr_at_001_fpr": overall_wm_tpr_001,
     }
 
     # 6. Format and Print Table
-    table_str = format_full_validation_table(ckpt_step, summary, quality_metrics=quality_metrics)
-    print("\n" + "=" * 80)
-    print(f"  FINAL TEST BENCHMARK RESULTS (Evaluated on {num_eval} Test Samples) ")
-    print("=" * 80)
+    table_str = format_full_validation_table(f"Step {ckpt_step}", summary, quality_metrics=quality_metrics)
+    print("\n" + "=" * 95)
+    print(f"  FINAL BENCHMARK RESULTS (Evaluated on {num_eval} Test Samples) ")
+    print("=" * 95)
     print(table_str, flush=True)
 
-    # 7. Save Evaluation Reports
     report_file = out_dir / "test_evaluation_report.txt"
     with open(report_file, "w", encoding="utf-8") as f:
-        f.write("=" * 80 + "\n")
+        f.write("=" * 95 + "\n")
         f.write(f" VALL-E Native Watermark Test Benchmark Report\n")
         f.write(f" Test Manifest:       {manifest_path}\n")
         f.write(f" Evaluated Cuts:      {num_eval} / {total_test_samples}\n")
         f.write(f" Watermark Checkpoint:{wm_ckpt_path} (Step {ckpt_step}, Epoch {ckpt_epoch})\n")
-        f.write(f" SpeechTokenizer:     {st_ckpt_path}\n")
-        f.write(f" WavLM Model:         {wavlm_path}\n")
-        f.write("=" * 80 + "\n\n")
+        f.write(f" Total Audio Duration:{total_audio_duration:.2f} s\n")
+        f.write("=" * 95 + "\n\n")
         f.write(table_str + "\n")
     logging.info(f"Saved text report to: {report_file}")
 
@@ -440,6 +572,7 @@ def main():
             "epoch": ckpt_epoch,
             "num_evaluated_samples": num_eval,
             "total_manifest_samples": total_test_samples,
+            "total_audio_duration_sec": total_audio_duration,
             "quality_metrics": quality_metrics,
             "attack_metrics": summary,
             "sample_audio_records": sample_audio_records,
@@ -453,7 +586,6 @@ def main():
         writer.writerows(csv_rows)
     logging.info(f"Saved CSV metrics to: {csv_file}")
 
-    # Release cached attack models
     release_codec_models()
     logging.info("Evaluation completed successfully!")
 

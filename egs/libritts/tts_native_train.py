@@ -71,6 +71,7 @@ except ImportError:
     from train.optimizer import get_optimizer
 
 from tts_native_loss import (
+    mel_loss,
     UTMOSLoss,
     SpeakerSimLoss,
     ASRLoss,
@@ -81,6 +82,7 @@ from tts_native_loss import (
     decoding_loss,
     feature_loss,
     vad_based_loss,
+    margin_vad_loss,
 )
 from tts_native_dataset import get_tts_native_dataloader
 from tts_native_attacks import (
@@ -125,9 +127,31 @@ class NeuMarkTrainer:
         self.adv_loss_lambda = cfg.get("adv_loss_lambda", 1.0)
         self.dec_loss_lambda = cfg.get("dec_loss_lambda", 10.0)
         self.vad_loss_lambda = cfg.get("vad_loss_lambda", 1.0)
+        self.vad_margin = cfg.get("vad_margin", 2.0)
         self.utmos_loss_lambda = cfg.get("utmos_loss_lambda", 0.5)
         self.sim_loss_lambda = cfg.get("sim_loss_lambda", 1.0)
         self.asr_loss_lambda = cfg.get("asr_loss_lambda", 0.5)
+        self.mel_loss_lambda = cfg.get("mel_loss_lambda", 0.0)
+        self.multi_scale_mel_loss_lambdas = cfg.get("multi_scale_mel_loss_lambdas", [5, 1, 1, 1])
+        self.multi_scale_mel_loss_kwargs_list = []
+        mult = 1
+        n_fft_base = cfg.get("n_fft", 1024)
+        hop_size_base = cfg.get("hop_size", 256)
+        win_size_base = cfg.get("win_size", 1024)
+        num_mels_base = cfg.get("num_mels", 80)
+        fmin_base = cfg.get("fmin", 0)
+        fmax_base = cfg.get("fmax", 8000)
+        for i in range(len(self.multi_scale_mel_loss_lambdas)):
+            self.multi_scale_mel_loss_kwargs_list.append({
+                "n_fft": n_fft_base // mult,
+                "num_mels": num_mels_base,
+                "sample_rate": self.sample_rate,
+                "hop_size": hop_size_base // mult,
+                "win_size": win_size_base // mult,
+                "fmin": fmin_base,
+                "fmax": fmax_base,
+            })
+            mult *= 2
 
         torch.manual_seed(self.seed)
 
@@ -531,13 +555,21 @@ class NeuMarkTrainer:
                 loss_cos = latent_cosine_loss(z_wm, z_q) * self.cos_loss_lambda
 
                 # B. UTMOS Naturalness Loss (Absolute MOS Maximization)
-                loss_utmos = self.utmos_loss(wm_audio, self.sample_rate) * self.utmos_loss_lambda
+                loss_utmos = (self.utmos_loss(wm_audio, self.sample_rate) * self.utmos_loss_lambda) if self.utmos_loss_lambda > 0 else torch.zeros((), device=self.device)
 
                 # C. Speaker Similarity Loss (WavLM vs Prompt)
-                loss_sim = self.sim_loss(wm_audio, prompt_audio, self.sample_rate) * self.sim_loss_lambda
+                loss_sim = (self.sim_loss(wm_audio, prompt_audio, self.sample_rate) * self.sim_loss_lambda) if self.sim_loss_lambda > 0 else torch.zeros((), device=self.device)
 
                 # D. ASR Pronunciation Loss (CTC vs Target Text)
-                loss_asr = self.asr_loss(wm_audio, texts, self.sample_rate) * self.asr_loss_lambda
+                loss_asr = (self.asr_loss(wm_audio, texts, self.sample_rate) * self.asr_loss_lambda) if self.asr_loss_lambda > 0 else torch.zeros((), device=self.device)
+
+                # Mel Loss (Multi-Scale Spectrogram L1)
+                loss_mel = torch.zeros((), device=self.device)
+                if self.mel_loss_lambda > 0:
+                    loss_mel = sum(
+                        mel_k[0] * mel_loss(real_audio_aligned, wm_audio_aligned, **mel_k[1])
+                        for mel_k in zip(self.multi_scale_mel_loss_lambdas, self.multi_scale_mel_loss_kwargs_list)
+                    ) * self.mel_loss_lambda
 
                 # E. GAN Adversarial & Feature Matching (Real = real_audio, Fake = wm_audio)
                 loss_adv = torch.zeros((), device=self.device)
@@ -574,7 +606,7 @@ class NeuMarkTrainer:
                 loss_dec = decoding_loss(chunk_logits, target_chunks) * self.dec_loss_lambda
 
                 min_lens_pos = min(logits.shape[-1], vad_labels.shape[-1])
-                loss_vad_pos = vad_based_loss(logits[..., :min_lens_pos], vad_labels[..., :min_lens_pos], from_logits=True) * self.vad_loss_lambda
+                loss_vad_pos = margin_vad_loss(logits[..., :min_lens_pos], vad_labels[..., :min_lens_pos], margin=self.vad_margin, from_logits=True) * self.vad_loss_lambda
 
                 # Negative sample supervision (Real unwatermarked audio)
                 augmented_neg, _, _ = apply_train_augmentation(
@@ -583,7 +615,7 @@ class NeuMarkTrainer:
                 neg_logits, _ = self.detect_watermark(augmented_neg, return_logits=True)
                 vad_labels_neg = torch.zeros_like(neg_logits)
                 min_lens_neg = min(neg_logits.shape[-1], vad_labels_neg.shape[-1])
-                loss_vad_neg = vad_based_loss(neg_logits[..., :min_lens_neg], vad_labels_neg[..., :min_lens_neg], from_logits=True) * self.vad_loss_lambda
+                loss_vad_neg = margin_vad_loss(neg_logits[..., :min_lens_neg], vad_labels_neg[..., :min_lens_neg], margin=self.vad_margin, from_logits=True) * self.vad_loss_lambda
 
                 # -------------------------------------------------------------
                 # 3. Total Loss & Generator Backward
@@ -594,6 +626,7 @@ class NeuMarkTrainer:
                     + loss_vad_neg
                     + loss_cos
                     + loss_adv
+                    + loss_mel
                     + loss_utmos
                     + loss_sim
                     + loss_asr

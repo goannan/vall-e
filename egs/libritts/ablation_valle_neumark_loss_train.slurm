@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=tts_native_wm
+#SBATCH --job-name=ablation_valle_neumark_loss
 #SBATCH --nodes=3
 #SBATCH --nodelist=mrcompute02,mrcompute03,compute07
 #SBATCH --gpus=4
@@ -17,17 +17,17 @@ WORK_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 cd "${WORK_DIR}"
 mkdir -p logs
 
-CONFIG_PATH=${1:-"${WORK_DIR}/config_tts_native.json"}
+CONFIG_PATH=${1:-"${WORK_DIR}/config_ablation_valle_neumark_loss.json"}
 
 # Parse nodes and master endpoint dynamically
 NODES_ARRAY=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 MASTER_NODE=${NODES_ARRAY[0]}
-MASTER_PORT=29500
+MASTER_PORT=29501
 NUM_NODES=${#NODES_ARRAY[@]}
 TOTAL_TASKS=${SLURM_NTASKS:-4}
 
 echo "=========================================================="
-echo " Starting NeuMark Training (3 Nodes, Total 4 GPUs)        "
+echo " Starting Ablation Training (3 Nodes, Total 4 GPUs)        "
 echo " Time:            $(date)                                 "
 echo " Master Endpoint: ${MASTER_NODE}:${MASTER_PORT}           "
 echo " Allocated Nodes: ${NUM_NODES} (${NODES_ARRAY[*]})       "
@@ -61,7 +61,7 @@ srun bash -c "
   export MASTER_ADDR=${MASTER_NODE}
   export MASTER_PORT=${MASTER_PORT}
 
-  python3 tts_native_train.py --config \"${CONFIG_PATH}\" 
+  python3 tts_native_train.py --config \"${CONFIG_PATH}\"
 "
 
 echo "=========================================================="

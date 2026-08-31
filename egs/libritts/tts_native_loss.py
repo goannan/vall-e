@@ -238,3 +238,105 @@ def latent_cosine_loss(z_wm: torch.Tensor, z_q: torch.Tensor) -> torch.Tensor:
     z_wm = z_wm[..., :min_len]
     z_q = z_q[..., :min_len]
     return cos_loss(z_wm, z_q)
+
+# -----------------------------------------------------------------------------
+# NeuMark Original Multi-Scale Mel Loss Implementation
+# -----------------------------------------------------------------------------
+_mel_basis_cache = {}
+_hann_window_cache = {}
+
+def mel_spectrogram_torch(y, n_fft, num_mels, sample_rate, hop_size, win_size, fmin, fmax, center=False):
+    n_fft = int(n_fft)
+    num_mels = int(num_mels)
+    sample_rate = int(sample_rate)
+    hop_size = int(hop_size)
+    win_size = int(win_size)
+    fmin = float(fmin)
+    fmax = float(fmax)
+
+    key = f"{fmax}_{win_size}_{y.device}"
+    global _mel_basis_cache, _hann_window_cache
+    if key not in _mel_basis_cache:
+        mel_transform = torchaudio.transforms.MelScale(
+            n_mels=num_mels,
+            sample_rate=sample_rate,
+            n_stft=n_fft // 2 + 1,
+            f_min=fmin,
+            f_max=fmax,
+            norm="slaney",
+            mel_scale="htk"
+        )
+        _mel_basis_cache[key] = mel_transform.fb.float().T.to(y.device)
+    
+    if key not in _hann_window_cache:
+        _hann_window_cache[key] = torch.hann_window(win_size).to(y.device)
+
+    # Pad waveform
+    y_in = y.squeeze(1) if y.dim() == 3 else y
+    y_pad = torch.nn.functional.pad(
+        y_in.unsqueeze(1),
+        (int((n_fft - hop_size) / 2), int((n_fft - hop_size) / 2)),
+        mode="reflect"
+    ).squeeze(1)
+
+    spec_complex = torch.stft(
+        y_pad, n_fft,
+        hop_length=hop_size,
+        win_length=win_size,
+        window=_hann_window_cache[key],
+        center=center,
+        pad_mode="reflect",
+        normalized=False,
+        onesided=True,
+        return_complex=True  
+    )
+
+    spec = torch.view_as_real(spec_complex)
+    spec = torch.sqrt(spec[..., 0] ** 2 + spec[..., 1] ** 2 + 1e-9)
+    spec = torch.matmul(_mel_basis_cache[key], spec)
+    spec = torch.log(torch.clamp(spec, min=1e-5))
+    return spec
+
+def mel_loss(x, x_hat, **kwargs):
+    x_mel = mel_spectrogram_torch(x, **kwargs)
+    x_hat_mel = mel_spectrogram_torch(x_hat, **kwargs)
+    length = min(x_mel.size(-1), x_hat_mel.size(-1))
+    return torch.nn.functional.l1_loss(x_mel[..., :length], x_hat_mel[..., :length])
+
+
+# ==========================================
+# 5. Large-Margin VAD Detection Loss
+# ==========================================
+def margin_vad_loss(
+    vad_pred: torch.Tensor,
+    vad_label: torch.Tensor,
+    margin: float = 2.0,
+    from_logits: bool = True
+) -> torch.Tensor:
+    """
+    Large-Margin BCE Loss for VAD Watermark Presence Detection.
+    Enforces logits >= margin for positive frames (1), and logits <= -margin for negative frames (0).
+    Creates a wide classification buffer zone to suppress false alarms under cross-domain evaluation.
+
+    Parameters
+    ----------
+    vad_pred : torch.Tensor
+        Model predicted logits or probabilities [B, T] or [B, 1, T].
+    vad_label : torch.Tensor
+        Binary label tensor [B, T] or [B, 1, T].
+    margin : float
+        Logit decision margin (default 2.0).
+    from_logits : bool
+        Whether vad_pred contains unnormalized raw logits (default True).
+    """
+    if from_logits:
+        if margin > 0:
+            # Positive frames (1): require logits >= margin -> shift by -margin
+            # Negative frames (0): require logits <= -margin -> shift by +margin
+            adjusted_logits = torch.where(vad_label > 0.5, vad_pred - margin, vad_pred + margin)
+            return F.binary_cross_entropy_with_logits(adjusted_logits, vad_label.float())
+        else:
+            return F.binary_cross_entropy_with_logits(vad_pred, vad_label.float())
+    else:
+        vad_pred = torch.clamp(vad_pred, 1e-6, 1 - 1e-6)
+        return F.binary_cross_entropy(vad_pred, vad_label.float())

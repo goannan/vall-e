@@ -2,9 +2,40 @@ import random
 from typing import Callable, Dict, List, Optional, Tuple
 
 import julius
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torchaudio
+
+try:
+    from sklearn.metrics import roc_auc_score, roc_curve
+except ImportError:
+    roc_auc_score, roc_curve = None, None
+
+
+def compute_auc_and_tpr_at_fpr(y_true, y_scores, target_fpr: float = 0.001) -> Tuple[float, float]:
+    if roc_auc_score is None or roc_curve is None or len(y_true) == 0:
+        return 0.5, 0.0
+    y_true = np.asarray(y_true)
+    y_scores = np.asarray(y_scores)
+    if len(np.unique(y_true)) < 2:
+        return 0.5, 0.0
+    try:
+        auc = float(roc_auc_score(y_true, y_scores))
+    except Exception:
+        auc = 0.5
+
+    try:
+        fpr, tpr, _ = roc_curve(y_true, y_scores)
+        valid_mask = fpr <= target_fpr
+        if np.any(valid_mask):
+            tpr_at_target = float(np.max(tpr[valid_mask]))
+        else:
+            tpr_at_target = float(tpr[0])
+    except Exception:
+        tpr_at_target = 0.0
+
+    return auc, tpr_at_target
 
 # Import attack implementations
 try:
@@ -410,97 +441,144 @@ def get_validation_attack_suite(sample_rate: int = 16000) -> List[Tuple[str, str
 
 
 def format_full_validation_table(step: int, results: Dict[str, Dict[str, float]], quality_metrics: Optional[Dict[str, float]] = None) -> str:
+    hdr_line = "=" * 125
+    div_line = "-" * 125
     lines = [
-        "=" * 80,
-        f"  NeuMark Validation Report (Step: {step:07d})",
-        "=" * 80,
-        f"{'Attack Type':<40} | {'Detect ACC':<12} | {'WM Bit Acc':<12}",
-        "-" * 80,
+        hdr_line,
+        f"  Benchmark Validation Report (Step / Epoch: {step})",
+        hdr_line,
+        f"{'Attack Type':<32} | {'Detect ACC':<11} | {'Det ROC-AUC':<11} | {'Det TPR@0.1%':<12} | {'WM Bit Acc':<11} | {'WM ROC-AUC':<11} | {'WM TPR@0.1%':<12}",
+        div_line,
     ]
 
-    dsp_accs, dsp_bits = [], []
-    codec_accs, codec_bits = [], []
+    dsp_det_accs, dsp_det_aucs, dsp_det_tprs = [], [], []
+    dsp_wm_accs, dsp_wm_aucs, dsp_wm_tprs = [], [], []
+    codec_det_accs, codec_det_aucs, codec_det_tprs = [], [], []
+    codec_wm_accs, codec_wm_aucs, codec_wm_tprs = [], [], []
 
     # 1. Print DSP Section
     for name, stats in results.items():
-        if stats["category"] == "DSP":
-            det_acc = stats["detect_acc"]
-            bit_acc = stats["bit_acc"]
-            dsp_accs.append(det_acc)
-            dsp_bits.append(bit_acc)
-            lines.append(f"{name:<40} | {det_acc:<12.4f} | {bit_acc:<12.4f}")
+        if stats.get("category") == "DSP":
+            det_acc = stats.get("detect_acc", 0.0)
+            det_auc = stats.get("det_roc_auc", stats.get("roc_auc", 0.5))
+            det_tpr = stats.get("det_tpr_at_001_fpr", stats.get("tpr_at_001_fpr", 0.0))
+            wm_bit = stats.get("bit_acc", 0.0)
+            wm_auc = stats.get("wm_roc_auc", 0.5)
+            wm_tpr = stats.get("wm_tpr_at_001_fpr", 0.0)
 
-    if dsp_accs:
-        avg_dsp_det = sum(dsp_accs) / len(dsp_accs)
-        avg_dsp_bit = sum(dsp_bits) / len(dsp_bits)
-        lines.append(f"{'DSP Avg.':<40} | {avg_dsp_det:<12.4f} | {avg_dsp_bit:<12.4f}")
-        lines.append("-" * 80)
+            dsp_det_accs.append(det_acc)
+            dsp_det_aucs.append(det_auc)
+            dsp_det_tprs.append(det_tpr)
+            dsp_wm_accs.append(wm_bit)
+            dsp_wm_aucs.append(wm_auc)
+            dsp_wm_tprs.append(wm_tpr)
+
+            lines.append(f"{name:<32} | {det_acc:<11.4f} | {det_auc:<11.4f} | {det_tpr:<12.4f} | {wm_bit:<11.4f} | {wm_auc:<11.4f} | {wm_tpr:<12.4f}")
+
+    if dsp_det_accs:
+        avg_d_acc = sum(dsp_det_accs) / len(dsp_det_accs)
+        avg_d_auc = sum(dsp_det_aucs) / len(dsp_det_aucs)
+        avg_d_tpr = sum(dsp_det_tprs) / len(dsp_det_tprs)
+        avg_w_acc = sum(dsp_wm_accs) / len(dsp_wm_accs)
+        avg_w_auc = sum(dsp_wm_aucs) / len(dsp_wm_aucs)
+        avg_w_tpr = sum(dsp_wm_tprs) / len(dsp_wm_tprs)
+        lines.append(f"{'DSP Avg.':<32} | {avg_d_acc:<11.4f} | {avg_d_auc:<11.4f} | {avg_d_tpr:<12.4f} | {avg_w_acc:<11.4f} | {avg_w_auc:<11.4f} | {avg_w_tpr:<12.4f}")
+        lines.append(div_line)
 
     # 2. Print Codec Section (Grouped by Family)
     codec_families = ["Encodec", "DAC", "SNAC"]
     for family in codec_families:
         first = True
         for name, stats in results.items():
-            if stats["category"] == "Codec" and stats["family"] == family:
-                det_acc = stats["detect_acc"]
-                bit_acc = stats["bit_acc"]
-                codec_accs.append(det_acc)
-                codec_bits.append(bit_acc)
-                bitrate = stats["bitrate"]
-                if first:
-                    label = f"{family:<16} {bitrate}"
-                    first = False
-                else:
-                    label = f"{'':<16} {bitrate}"
-                lines.append(f"{label:<40} | {det_acc:<12.4f} | {bit_acc:<12.4f}")
+            if stats.get("category") == "Codec" and stats.get("family") == family:
+                det_acc = stats.get("detect_acc", 0.0)
+                det_auc = stats.get("det_roc_auc", stats.get("roc_auc", 0.5))
+                det_tpr = stats.get("det_tpr_at_001_fpr", stats.get("tpr_at_001_fpr", 0.0))
+                wm_bit = stats.get("bit_acc", 0.0)
+                wm_auc = stats.get("wm_roc_auc", 0.5)
+                wm_tpr = stats.get("wm_tpr_at_001_fpr", 0.0)
+
+                codec_det_accs.append(det_acc)
+                codec_det_aucs.append(det_auc)
+                codec_det_tprs.append(det_tpr)
+                codec_wm_accs.append(wm_bit)
+                codec_wm_aucs.append(wm_auc)
+                codec_wm_tprs.append(wm_tpr)
+
+                bitrate = stats.get("bitrate", "")
+                label = f"{family:<14} {bitrate}" if first else f"{'':<14} {bitrate}"
+                first = False
+                lines.append(f"{label:<32} | {det_acc:<11.4f} | {det_auc:<11.4f} | {det_tpr:<12.4f} | {wm_bit:<11.4f} | {wm_auc:<11.4f} | {wm_tpr:<12.4f}")
         lines.append("")
 
     if lines[-1] == "":
         lines.pop()
 
-    if codec_accs:
-        avg_codec_det = sum(codec_accs) / len(codec_accs)
-        avg_codec_bit = sum(codec_bits) / len(codec_bits)
-        lines.append(f"{'Codec Avg.':<40} | {avg_codec_det:<12.4f} | {avg_codec_bit:<12.4f}")
-        lines.append("-" * 80)
+    if codec_det_accs:
+        avg_c_d_acc = sum(codec_det_accs) / len(codec_det_accs)
+        avg_c_d_auc = sum(codec_det_aucs) / len(codec_det_aucs)
+        avg_c_d_tpr = sum(codec_det_tprs) / len(codec_det_tprs)
+        avg_c_w_acc = sum(codec_wm_accs) / len(codec_wm_accs)
+        avg_c_w_auc = sum(codec_wm_aucs) / len(codec_wm_aucs)
+        avg_c_w_tpr = sum(codec_wm_tprs) / len(codec_wm_tprs)
+        lines.append(f"{'Codec Avg.':<32} | {avg_c_d_acc:<11.4f} | {avg_c_d_auc:<11.4f} | {avg_c_d_tpr:<12.4f} | {avg_c_w_acc:<11.4f} | {avg_c_w_auc:<11.4f} | {avg_c_w_tpr:<12.4f}")
+        lines.append(div_line)
 
-    all_accs = dsp_accs + codec_accs
-    all_bits = dsp_bits + codec_bits
-    if all_accs:
-        total_avg_det = sum(all_accs) / len(all_accs)
-        total_avg_bit = sum(all_bits) / len(all_bits)
-        lines.append(f"{'Avg.':<40} | {total_avg_det:<12.4f} | {total_avg_bit:<12.4f}")
+    all_d_accs = dsp_det_accs + codec_det_accs
+    all_d_aucs = dsp_det_aucs + codec_det_aucs
+    all_d_tprs = dsp_det_tprs + codec_det_tprs
+    all_w_accs = dsp_wm_accs + codec_wm_accs
+    all_w_aucs = dsp_wm_aucs + codec_wm_aucs
+    all_w_tprs = dsp_wm_tprs + codec_wm_tprs
+
+    if all_d_accs:
+        tot_d_acc = sum(all_d_accs) / len(all_d_accs)
+        tot_d_auc = sum(all_d_aucs) / len(all_d_aucs)
+        tot_d_tpr = sum(all_d_tprs) / len(all_d_tprs)
+        tot_w_acc = sum(all_w_accs) / len(all_w_accs)
+        tot_w_auc = sum(all_w_aucs) / len(all_w_aucs)
+        tot_w_tpr = sum(all_w_tprs) / len(all_w_tprs)
+        lines.append(f"{'Overall Avg.':<32} | {tot_d_acc:<11.4f} | {tot_d_auc:<11.4f} | {tot_d_tpr:<12.4f} | {tot_w_acc:<11.4f} | {tot_w_auc:<11.4f} | {tot_w_tpr:<12.4f}")
 
     if quality_metrics:
-        lines.append("=" * 80)
-        lines.append("  Speech Quality & Fidelity Degradation (Clean TTS vs. NeuMark Watermarked):")
-        lines.append("-" * 80)
-        lines.append(f"{'Metric':<25} | {'Clean TTS':<12} | {'Watermarked':<12} | {'Delta (WM - Clean)':<18}")
-        lines.append("-" * 80)
+        lines.append("=" * 125)
+        lines.append("  Speech Quality & Fidelity Degradation (Clean TTS vs. Watermarked):")
+        lines.append("-" * 125)
+        lines.append(f"{'Metric':<28} | {'Clean TTS':<12} | {'Watermarked':<12} | {'Delta (WM - Clean)':<18}")
+        lines.append("-" * 125)
 
         # UTMOS
         c_ut = quality_metrics.get("clean_utmos", 0.0)
         w_ut = quality_metrics.get("wm_utmos", 0.0)
         d_ut = w_ut - c_ut
-        lines.append(f"{'UTMOS (MOS 1.0 - 5.0)':<25} | {c_ut:<12.4f} | {w_ut:<12.4f} | {d_ut:+12.4f}")
+        lines.append(f"{'UTMOS (MOS 1.0 - 5.0)':<28} | {c_ut:<12.4f} | {w_ut:<12.4f} | {d_ut:+12.4f}")
 
         # SIM
         c_sim = quality_metrics.get("clean_sim", 0.0)
         w_sim = quality_metrics.get("wm_sim", 0.0)
         d_sim = w_sim - c_sim
-        lines.append(f"{'SIM (Speaker Cosine Sim)':<25} | {c_sim:<12.4f} | {w_sim:<12.4f} | {d_sim:+12.4f}")
+        lines.append(f"{'SIM (Speaker Cosine Sim)':<28} | {c_sim:<12.4f} | {w_sim:<12.4f} | {d_sim:+12.4f}")
 
         # WER
         c_wer = quality_metrics.get("clean_wer", 0.0)
         w_wer = quality_metrics.get("wm_wer", 0.0)
         d_wer = w_wer - c_wer
-        lines.append(f"{'ASR WER (Word Error Rate)':<25} | {c_wer:<12.4f} | {w_wer:<12.4f} | {d_wer:+12.4f}")
+        lines.append(f"{'ASR WER (Word Error Rate)':<28} | {c_wer:<12.4f} | {w_wer:<12.4f} | {d_wer:+12.4f}")
 
         # CER
         c_cer = quality_metrics.get("clean_cer", 0.0)
         w_cer = quality_metrics.get("wm_cer", 0.0)
         d_cer = w_cer - c_cer
-        lines.append(f"{'ASR CER (Char Error Rate)':<25} | {c_cer:<12.4f} | {w_cer:<12.4f} | {d_cer:+12.4f}")
+        lines.append(f"{'ASR CER (Char Error Rate)':<28} | {c_cer:<12.4f} | {w_cer:<12.4f} | {d_cer:+12.4f}")
+        lines.append("-" * 125)
 
-    lines.append("=" * 80)
+        # Runtime Overhead
+        emb_ms = quality_metrics.get("embed_overhead_ms_per_sec", 0.0)
+        det_ms = quality_metrics.get("detect_latency_ms_per_sec", 0.0)
+        lines.append("  Efficiency & Computational Latency:")
+        lines.append("-" * 125)
+        lines.append(f"{'Embedding Overhead (ms/s)':<28} | {emb_ms:<12.2f} ms per second of audio")
+        lines.append(f"{'Detection Latency (ms/s)':<28} | {det_ms:<12.2f} ms per second of audio")
+
+    lines.append("=" * 125)
     return "\n".join(lines)
