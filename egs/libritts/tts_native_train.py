@@ -635,7 +635,7 @@ class NeuMarkTrainer:
                         for mel_k in zip(self.multi_scale_mel_loss_lambdas, self.multi_scale_mel_loss_kwargs_list)
                     ) * self.mel_loss_lambda
 
-                # E. GAN Adversarial & Feature Matching (Real = real_audio, Fake = wm_audio)
+                # E. GAN Adversarial & Feature Matching (Real = recon_audio, Fake = wm_audio)
                 loss_adv = torch.zeros((), device=self.device)
                 loss_fm = torch.zeros((), device=self.device)
                 adversarial_components = {}
@@ -649,7 +649,7 @@ class NeuMarkTrainer:
                     for name, discriminator in self.discriminators.items():
                         d_unwrapped = self.accelerator.unwrap_model(discriminator)
                         _, fake_preds, real_fmaps, fake_fmaps = d_unwrapped(
-                            real_audio_aligned, wm_audio_aligned
+                            recon_audio_aligned, wm_audio_aligned
                         )
                         comp = torch.stack([adversarial_loss_g(p) for p in fake_preds]).mean()
                         adversarial_components[name] = comp
@@ -672,10 +672,15 @@ class NeuMarkTrainer:
                 min_lens_pos = min(logits.shape[-1], vad_labels.shape[-1])
                 loss_vad_pos = margin_vad_loss(logits[..., :min_lens_pos], vad_labels[..., :min_lens_pos], margin=self.vad_margin, from_logits=True) * self.vad_loss_lambda
 
-                # Negative sample supervision (Real unwatermarked audio)
-                augmented_neg, _, _ = apply_train_augmentation(
-                    real_audio, sample_rate=self.sample_rate, orig_audio=None
-                )
+                # Negative sample supervision (Alternating Real Audio and Clean Recon Audio matching NeuMark)
+                if steps % 2 == 0:
+                    augmented_neg, _, _ = apply_train_augmentation(
+                        real_audio, sample_rate=self.sample_rate, orig_audio=None
+                    )
+                else:
+                    augmented_neg, _, _ = apply_train_augmentation(
+                        recon_audio, sample_rate=self.sample_rate, orig_audio=None
+                    )
                 neg_logits, _ = self.detect_watermark(augmented_neg, return_logits=True)
                 vad_labels_neg = torch.zeros_like(neg_logits)
                 min_lens_neg = min(neg_logits.shape[-1], vad_labels_neg.shape[-1])
@@ -709,7 +714,7 @@ class NeuMarkTrainer:
 
                     for name, discriminator in self.discriminators.items():
                         real_preds, fake_preds, _, _ = discriminator(
-                            real_audio_aligned, wm_audio_aligned.detach()
+                            recon_audio_aligned, wm_audio_aligned.detach()
                         )
                         comp = torch.stack([adversarial_loss_d(r, f) for r, f in zip(real_preds, fake_preds)]).mean()
                         discriminator_components[name] = comp
