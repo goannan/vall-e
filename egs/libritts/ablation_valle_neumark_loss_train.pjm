@@ -1,0 +1,36 @@
+#!/bin/bash
+#PJM -L rscgrp=b-batch
+#PJM -L gpu=1
+#PJM -L elapse=144:00:00
+#PJM -L jobenv=singularity
+#PJM -o logs/ablation_neumark_%j.out
+#PJM -e logs/ablation_neumark_%j.err
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+mkdir -p logs
+
+module load singularity-ce
+
+SIF="/home/pj25001109/${USER}/latest.sif"
+JOB_ID="${PJM_JOBID:-manual}"
+MONITOR_LOG="logs/monitor_ablation_${JOB_ID}.log"
+
+(
+    while true; do
+        echo "===== $(date) ====="
+        singularity exec --nv --bind "$HOME" "$SIF" nvidia-smi || true
+        ps -u "$USER" -o pid,ppid,pcpu,pmem,etime,cmd --sort=-pcpu | head -30 || true
+        sleep 60
+    done
+) > "$MONITOR_LOG" 2>&1 &
+
+MONITOR_PID=$!
+trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
+
+echo "Monitor log: $MONITOR_LOG"
+CONFIG_PATH="${1:-${SCRIPT_DIR}/config_ablation_valle_neumark_loss.json}"
+singularity exec --nv --bind "$HOME" "$SIF" bash "${SCRIPT_DIR}/tts_native_train.sh" "${CONFIG_PATH}"
