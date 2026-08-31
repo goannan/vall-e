@@ -95,9 +95,18 @@ class SpeakerSimLoss(nn.Module):
             wm_audio = wm_audio.squeeze(1)
         if prompt_audio.ndim == 3:
             prompt_audio = prompt_audio.squeeze(1)
+
+        # Safety: if prompt_audio is empty or pure silence, return 1.0 (no degradation reference)
+        if prompt_audio.numel() == 0 or prompt_audio.abs().max() < 1e-4:
+            return 1.0
+
         if sample_rate != 16000:
             wm_audio = torchaudio.functional.resample(wm_audio, sample_rate, 16000)
             prompt_audio = torchaudio.functional.resample(prompt_audio, sample_rate, 16000)
+
+        wm_audio = wm_audio.to(self.device).float()
+        prompt_audio = prompt_audio.to(self.device).float()
+
         with torch.no_grad():
             emb_wm = self.model(wm_audio)
             emb_prompt = self.model(prompt_audio)
@@ -140,6 +149,10 @@ class SpeakerSimLoss(nn.Module):
         Inputs: wm_audio [B, 1, T], prompt_audio [B, 1, T_p]
         Output: scalar loss (1.0 - cosine_sim)
         """
+        # Safety: if prompt_audio is empty or pure silence, no valid speaker target
+        if prompt_audio.numel() == 0 or prompt_audio.abs().max() < 1e-4:
+            return torch.zeros((), device=self.device)
+
         if wm_audio.ndim == 3:
             wm_audio = wm_audio.squeeze(1)
         if prompt_audio.ndim == 3:
@@ -148,6 +161,9 @@ class SpeakerSimLoss(nn.Module):
         if sample_rate != 16000:
             wm_audio = torchaudio.functional.resample(wm_audio, sample_rate, 16000)
             prompt_audio = torchaudio.functional.resample(prompt_audio, sample_rate, 16000)
+
+        wm_audio = wm_audio.to(self.device).float()
+        prompt_audio = prompt_audio.to(self.device).float()
 
         if not self.available:
             return cos_loss(wm_audio, prompt_audio[..., :wm_audio.shape[-1]])

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -6,6 +7,39 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from lhotse import CutSet, load_manifest_lazy
 import torchaudio
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = SCRIPT_DIR.parent.parent
+
+
+def find_audio_path(candidate_path: str, manifest_dir: Optional[Path] = None) -> Optional[Path]:
+    """Resolves an audio path adaptively across different clusters (local, Genkai, etc.)."""
+    p = Path(candidate_path)
+    if p.exists():
+        return p
+
+    str_p = str(candidate_path)
+    if "LibriTTS" in str_p:
+        rel_sub = str_p[str_p.index("LibriTTS") :]
+    elif "download" in str_p:
+        rel_sub = str_p[str_p.index("download") :]
+    else:
+        rel_sub = p.name
+
+    search_roots = [
+        manifest_dir.parents[1] if manifest_dir else None,
+        SCRIPT_DIR,
+        PROJECT_DIR / "egs/libritts",
+        Path(os.environ.get("LIBRITTS_ROOT", "")),
+        Path.cwd(),
+    ]
+
+    for root in search_roots:
+        if root and root.exists():
+            for target in [root / rel_sub, root / "download" / rel_sub, root / "download/LibriTTS" / rel_sub]:
+                if target.exists():
+                    return target
+    return None
 
 
 class TTSNativeDataset(Dataset):
@@ -29,7 +63,6 @@ class TTSNativeDataset(Dataset):
 
         print(f"[Dataset] Loading manifest: {self.manifest_path} (full audio mode)...")
         self.cuts = load_manifest_lazy(self.manifest_path)
-        # Filter only extreme outliers (e.g. >30s or <0.5s)
         self.cuts = self.cuts.filter(lambda c: min_duration <= c.duration <= max_duration)
         self.cut_list = list(self.cuts)
         print(f"[Dataset] Loaded {len(self.cut_list)} valid full-length cuts.")
@@ -47,48 +80,64 @@ class TTSNativeDataset(Dataset):
         # 2. Full text transcript
         text = cut.supervisions[0].text if cut.supervisions else ""
 
-        # 3. Audio recording: [1, T_samples] (with resilient fallback if raw wavs are not colocated)
-        try:
-            if cut.has_recording:
-                audio_np = cut.recording.load_audio()
-                audio = torch.from_numpy(audio_np).float()
-                if cut.recording.sampling_rate != self.sample_rate:
-                    audio = torchaudio.functional.resample(audio, cut.recording.sampling_rate, self.sample_rate)
-            else:
-                audio = torch.zeros((1, codes.shape[-1] * self.downsample_rate), dtype=torch.float32)
-        except Exception:
+        # 3. Audio recording: resolve real audio if available
+        audio = None
+        if cut.has_recording and len(cut.recording.sources) > 0:
+            rec_source = cut.recording.sources[0].source
+            resolved_p = find_audio_path(rec_source, self.manifest_path.parent)
+            if resolved_p is not None:
+                try:
+                    audio_t, sr = torchaudio.load(str(resolved_p))
+                    if sr != self.sample_rate:
+                        audio_t = torchaudio.functional.resample(audio_t, sr, self.sample_rate)
+                    audio = audio_t
+                except Exception:
+                    audio = None
+
+        if audio is None:
             # Reconstruct clean placeholder audio if raw LibriTTS directory is not downloaded on remote node
             audio = torch.zeros((1, codes.shape[-1] * self.downsample_rate), dtype=torch.float32)
 
         # 4. Prompt audio: resolve speaker reference recording (prompt wav or target speaker audio)
         prompt_audio = None
         p_id = cut.custom.get("prompt_cut_id", "") if cut.custom else ""
-        if p_id and cut.has_recording and len(cut.recording.sources) > 0:
-            try:
-                rec_source = cut.recording.sources[0].source
-                rec_path = Path(rec_source)
-                p_rec_id = p_id.rsplit("-", 1)[0] if "-" in p_id else p_id
-                parts = p_rec_id.split("_")
-                if len(parts) >= 4:
-                    spk, chap = parts[0], parts[1]
-                    p_wav_path = rec_path.parents[2] / spk / chap / f"{p_rec_id}.wav"
-                    if p_wav_path.exists():
-                        p_wav, p_sr = torchaudio.load(str(p_wav_path))
-                        if p_sr != self.sample_rate:
-                            p_wav = torchaudio.functional.resample(p_wav, p_sr, self.sample_rate)
-                        prompt_audio = p_wav
-            except Exception:
-                prompt_audio = None
+        if p_id:
+            p_rec_id = p_id.rsplit("-", 1)[0] if "-" in p_id else p_id
+            parts = p_rec_id.split("_")
+            if len(parts) >= 4:
+                spk, chap = parts[0], parts[1]
+                for root_candidate in [
+                    self.manifest_path.parents[1] / "download/LibriTTS",
+                    SCRIPT_DIR / "download/LibriTTS",
+                    Path(os.environ.get("LIBRITTS_ROOT", "")),
+                ]:
+                    if root_candidate.exists():
+                        for subset in ["dev-clean", "train-clean-100", "train-clean-360", "test-clean"]:
+                            cand = root_candidate / subset / spk / chap / f"{p_rec_id}.wav"
+                            if cand.exists():
+                                try:
+                                    p_wav, p_sr = torchaudio.load(str(cand))
+                                    if p_sr != self.sample_rate:
+                                        p_wav = torchaudio.functional.resample(p_wav, p_sr, self.sample_rate)
+                                    prompt_audio = p_wav
+                                    break
+                                except Exception:
+                                    pass
+                        if prompt_audio is not None:
+                            break
+
+        if prompt_audio is None and audio.abs().max() > 1e-4:
+            prompt_audio = audio.clone()
 
         if prompt_audio is None:
-            prompt_audio = audio.clone()
+            prompt_audio = torch.empty((1, 0), dtype=torch.float32)
 
         return {
             "id": cut.id,
             "codes": codes,  # [8, T]
             "text": text,
             "audio": audio,  # [1, T_samples]
-            "prompt_audio": prompt_audio,  # [1, T_samples]
+            "prompt_audio": prompt_audio,  # [1, T_samples] (or empty if missing)
             "frames": codes.shape[-1],
         }
 
@@ -98,11 +147,11 @@ def collate_tts_native(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     batch_size = len(batch)
     max_frames = max(item["codes"].shape[-1] for item in batch)
     max_audio_len = max_frames * 320
-    max_prompt_len = max(item["prompt_audio"].shape[-1] for item in batch)
+    max_prompt_len = max((item["prompt_audio"].shape[-1] if item["prompt_audio"].numel() > 0 else 0) for item in batch)
 
     padded_codes = torch.zeros((batch_size, 8, max_frames), dtype=torch.long)
     padded_audio = torch.zeros((batch_size, 1, max_audio_len), dtype=torch.float32)
-    padded_prompt = torch.zeros((batch_size, 1, max_prompt_len), dtype=torch.float32)
+    padded_prompt = torch.zeros((batch_size, 1, max_prompt_len), dtype=torch.float32) if max_prompt_len > 0 else torch.empty((batch_size, 1, 0), dtype=torch.float32)
     frame_lengths = []
     texts = []
     ids = []
@@ -110,11 +159,12 @@ def collate_tts_native(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     for i, item in enumerate(batch):
         f_len = item["codes"].shape[-1]
         a_len = min(item["audio"].shape[-1], f_len * 320)
-        p_len = item["prompt_audio"].shape[-1]
+        p_len = item["prompt_audio"].shape[-1] if item["prompt_audio"].numel() > 0 else 0
 
         padded_codes[i, :, :f_len] = item["codes"]
         padded_audio[i, :, :a_len] = item["audio"][:, :a_len]
-        padded_prompt[i, :, :p_len] = item["prompt_audio"]
+        if p_len > 0 and padded_prompt.shape[-1] >= p_len:
+            padded_prompt[i, :, :p_len] = item["prompt_audio"]
 
         frame_lengths.append(f_len)
         texts.append(item["text"])

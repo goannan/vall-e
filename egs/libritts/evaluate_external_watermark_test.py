@@ -438,8 +438,9 @@ def main():
             pass
 
         try:
-            c_s = sim_loss.get_similarity(clean_audio, prompt_audio, 16000)
-            w_s = sim_loss.get_similarity(wm_audio, prompt_audio, 16000)
+            ref_spk = prompt_audio if (prompt_audio.numel() > 0 and prompt_audio.abs().max() > 1e-4) else clean_audio
+            c_s = sim_loss.get_similarity(clean_audio, ref_spk, 16000)
+            w_s = sim_loss.get_similarity(wm_audio, ref_spk, 16000)
             clean_sim_list.append(c_s)
             wm_sim_list.append(w_s)
         except Exception:

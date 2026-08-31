@@ -382,8 +382,9 @@ class NeuMarkTrainer:
                 # 4. Speaker SIM Evaluation (Clean vs WM)
                 if hasattr(self, "sim_loss"):
                     try:
-                        c_s = self.sim_loss.get_similarity(clean_audio, prompt_audio, self.sample_rate)
-                        w_s = self.sim_loss.get_similarity(wm_audio, prompt_audio, self.sample_rate)
+                        ref_spk = prompt_audio if (prompt_audio.numel() > 0 and prompt_audio.abs().max() > 1e-4) else clean_audio
+                        c_s = self.sim_loss.get_similarity(clean_audio, ref_spk, self.sample_rate)
+                        w_s = self.sim_loss.get_similarity(wm_audio, ref_spk, self.sample_rate)
                         clean_sim_list.append(c_s)
                         wm_sim_list.append(w_s)
                     except Exception:
@@ -557,8 +558,9 @@ class NeuMarkTrainer:
                 # B. UTMOS Naturalness Loss (Absolute MOS Maximization)
                 loss_utmos = (self.utmos_loss(wm_audio, self.sample_rate) * self.utmos_loss_lambda) if self.utmos_loss_lambda > 0 else torch.zeros((), device=self.device)
 
-                # C. Speaker Similarity Loss (WavLM vs Prompt)
-                loss_sim = (self.sim_loss(wm_audio, prompt_audio, self.sample_rate) * self.sim_loss_lambda) if self.sim_loss_lambda > 0 else torch.zeros((), device=self.device)
+                # C. Speaker Similarity Loss (WavLM vs Prompt / Clean Speech Reference)
+                ref_prompt = prompt_audio if (prompt_audio.numel() > 0 and prompt_audio.abs().max() > 1e-4) else clean_audio.detach()
+                loss_sim = (self.sim_loss(wm_audio, ref_prompt, self.sample_rate) * self.sim_loss_lambda) if self.sim_loss_lambda > 0 else torch.zeros((), device=self.device)
 
                 # D. ASR Pronunciation Loss (CTC vs Target Text)
                 loss_asr = (self.asr_loss(wm_audio, texts, self.sample_rate) * self.asr_loss_lambda) if self.asr_loss_lambda > 0 else torch.zeros((), device=self.device)
