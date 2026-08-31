@@ -295,22 +295,32 @@ def mel_spectrogram_torch(y, n_fft, num_mels, sample_rate, hop_size, win_size, f
         mode="reflect"
     ).squeeze(1)
 
-    spec_complex = torch.stft(
-        y_pad, n_fft,
-        hop_length=hop_size,
-        win_length=win_size,
-        window=_hann_window_cache[key],
-        center=center,
-        pad_mode="reflect",
-        normalized=False,
-        onesided=True,
-        return_complex=True  
-    )
+    device_type = y.device.type
+    with torch.autocast(device_type=device_type, enabled=False):
+        y_pad = y_pad.float().contiguous()
+        if y_pad.shape[-1] < win_size:
+            pad_amount = win_size - y_pad.shape[-1]
+            y_pad = torch.nn.functional.pad(y_pad, (0, pad_amount), mode="constant", value=0.0)
 
-    spec = torch.view_as_real(spec_complex)
-    spec = torch.sqrt(spec[..., 0] ** 2 + spec[..., 1] ** 2 + 1e-9)
-    spec = torch.matmul(_mel_basis_cache[key], spec)
-    spec = torch.log(torch.clamp(spec, min=1e-5))
+        window = _hann_window_cache[key].float()
+        basis = _mel_basis_cache[key].float()
+
+        spec_complex = torch.stft(
+            y_pad, n_fft,
+            hop_length=hop_size,
+            win_length=win_size,
+            window=window,
+            center=center,
+            pad_mode="reflect",
+            normalized=False,
+            onesided=True,
+            return_complex=True  
+        )
+
+        spec = torch.view_as_real(spec_complex)
+        spec = torch.sqrt(spec[..., 0] ** 2 + spec[..., 1] ** 2 + 1e-9)
+        spec = torch.matmul(basis, spec)
+        spec = torch.log(torch.clamp(spec, min=1e-5))
     return spec
 
 def mel_loss(x, x_hat, **kwargs):

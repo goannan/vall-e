@@ -63,8 +63,7 @@ class TTSNativeDataset(Dataset):
 
         print(f"[Dataset] Loading manifest: {self.manifest_path} (full audio mode)...")
         self.cuts = load_manifest_lazy(self.manifest_path)
-        self.cuts = self.cuts.filter(lambda c: min_duration <= c.duration <= max_duration)
-        self.cut_list = list(self.cuts)
+        self.cut_list = [c for c in self.cuts if min_duration <= c.duration <= max_duration]
         print(f"[Dataset] Loaded {len(self.cut_list)} valid full-length cuts.")
 
     def __len__(self) -> int:
@@ -74,8 +73,11 @@ class TTSNativeDataset(Dataset):
         cut = self.cut_list[idx]
 
         # 1. Load full 8-layer SpeechTokenizer codes: [T, 8] -> [8, T]
-        codes_np = cut.load_features()  # [T, 8]
-        codes = torch.from_numpy(codes_np).long().transpose(0, 1)  # [8, T]
+        try:
+            codes_np = cut.load_features()  # [T, 8]
+            codes = torch.from_numpy(codes_np).long().transpose(0, 1)  # [8, T]
+        except Exception:
+            codes = torch.zeros((8, int(self.sample_rate / self.downsample_rate * 2)), dtype=torch.long)
 
         # 2. Full text transcript
         text = cut.supervisions[0].text if cut.supervisions else ""
@@ -94,7 +96,7 @@ class TTSNativeDataset(Dataset):
                 except Exception:
                     audio = None
 
-        if audio is None:
+        if audio is None or audio.numel() == 0:
             # Reconstruct clean placeholder audio if raw LibriTTS directory is not downloaded on remote node
             audio = torch.zeros((1, codes.shape[-1] * self.downsample_rate), dtype=torch.float32)
 
@@ -184,7 +186,7 @@ def get_tts_native_dataloader(
     manifest_path: str,
     batch_size: int = 8,
     shuffle: bool = True,
-    num_workers: int = 4,
+    num_workers: int = 0,
     max_duration: float = 30.0,
     min_duration: float = 0.5,
 ) -> DataLoader:
@@ -199,6 +201,7 @@ def get_tts_native_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=collate_tts_native,
-        pin_memory=True,
+        pin_memory=(num_workers == 0 or torch.cuda.is_available()),
+        persistent_workers=(num_workers > 0),
         drop_last=True,
     )

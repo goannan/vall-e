@@ -1,7 +1,7 @@
 {
-    "train_manifest": "data/tokenized_voicemark/cuts_train_valle_native.jsonl.gz",
+    "train_manifest": "data/tokenized_voicemark/cuts_train.jsonl.gz",
     "valid_manifest": "data/tokenized_voicemark/cuts_dev_valle_native.jsonl.gz",
-    "results_folder": "exp/tts_native_neumark",
+    "results_folder": "exp/ablation_real_tokens",
     "wavlm_checkpoint": "models/wavlm_large_finetune.pth",
     "sample_rate": 16000,
     "batch_size": 12,

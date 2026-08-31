@@ -23,3 +23,5 @@ egs/*/logs/
 
 synthesized_data/
 egs/*/synthesized_data/
+.d*
+*.err

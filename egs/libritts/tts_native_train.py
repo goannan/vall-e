@@ -90,7 +90,7 @@ from tts_native_attacks import (
     compute_wer_cer,
     apply_train_augmentation,
     get_validation_attack_suite,
-    
+    compute_auc_and_tpr_at_fpr,
     release_codec_models,
 )
 
@@ -163,6 +163,11 @@ class NeuMarkTrainer:
             kwargs_handlers=[ddp_kwargs],
         )
         self.device = self.accelerator.device
+        if torch.cuda.is_available():
+            try:
+                torch.backends.cuda.cufft_plan_cache.max_size = 4096
+            except Exception:
+                pass
 
         # Setup Logging
         base_results = Path(cfg.get("results_folder", "exp/tts_native_neumark"))
@@ -328,6 +333,7 @@ class NeuMarkTrainer:
 
         val_attacks = get_validation_attack_suite(self.sample_rate)
         results = {}
+        attack_scores = {}
         for cat, name, detail, _ in val_attacks:
             key = name if cat == "DSP" else f"{name} {detail}"
             results[key] = {
@@ -336,8 +342,16 @@ class NeuMarkTrainer:
                 "bitrate": detail,
                 "bit_matches": 0,
                 "total_bits": 0,
-                "det_matches": 0,
-                "total_frames": 0,
+                "pos_matches": 0,
+                "pos_frames": 0,
+                "neg_matches": 0,
+                "neg_frames": 0,
+            }
+            attack_scores[key] = {
+                "pos_det_scores": [],
+                "neg_det_scores": [],
+                "pos_wm_scores": [],
+                "neg_wm_scores": [],
             }
 
         clean_utmos_list, wm_utmos_list = [], []
@@ -405,49 +419,92 @@ class NeuMarkTrainer:
                     except Exception:
                         pass
 
-                # Robustness Evaluation across DSP + Codec attacks
+                # Robustness Evaluation across DSP + Codec attacks (both positive and negative audio)
                 for cat, name, detail, atk_fn in val_attacks:
                     key = name if cat == "DSP" else f"{name} {detail}"
+                    
+                    # 1. Positive Sample (Watermarked Audio)
                     try:
-                        attacked_audio = atk_fn(wm_audio)
-                    except Exception as e:
-                        attacked_audio = wm_audio
+                        attacked_wm = atk_fn(wm_audio)
+                    except Exception:
+                        attacked_wm = wm_audio
 
-                    embedding = generator.forward_feature(attacked_audio)
-                    logits, chunk_logits = detector(embedding)
+                    embedding_wm = generator.forward_feature(attacked_wm)
+                    prob_wm_t, pred_bits_wm, _ = detector.detect_watermark(embedding_wm)
+                    prob_wm = float(prob_wm_t.mean().item())
+                    bit_matches = (pred_bits_wm.long() == message.long()).sum().item()
+                    tp_flag = 1 if prob_wm >= 0.5 else 0
 
-                    # Extract bits
-                    detect_prob, pred_bits, detected = detector.detect_watermark(embedding)
-                    bit_correct = (pred_bits.long() == message.long()).sum().item()
-                    total_b = message.numel()
+                    # 2. Negative Sample (Clean / Unwatermarked Audio)
+                    try:
+                        attacked_cl = atk_fn(clean_audio)
+                    except Exception:
+                        attacked_cl = clean_audio
 
-                    # VAD detection accuracy
-                    det_correct = (logits > 0.0).sum().item()
-                    total_f = logits.numel()
+                    embedding_cl = generator.forward_feature(attacked_cl)
+                    prob_cl_t, pred_bits_cl, _ = detector.detect_watermark(embedding_cl)
+                    prob_cl = float(prob_cl_t.mean().item())
+                    cl_bit_matches = (pred_bits_cl.long() == message.long()).sum().item()
+                    clean_tp_flag = 1 if prob_cl >= 0.5 else 0
+                    tn_flag = 1 - clean_tp_flag
 
-                    results[key]["bit_matches"] += bit_correct
-                    results[key]["total_bits"] += total_b
-                    results[key]["det_matches"] += det_correct
-                    results[key]["total_frames"] += total_f
+                    results[key]["bit_matches"] += bit_matches
+                    results[key]["total_bits"] += 16
+                    results[key]["pos_matches"] += tp_flag
+                    results[key]["pos_frames"] += 1
+                    results[key]["neg_matches"] += tn_flag
+                    results[key]["neg_frames"] += 1
+
+                    attack_scores[key]["pos_det_scores"].append(prob_wm)
+                    attack_scores[key]["neg_det_scores"].append(prob_cl)
+                    attack_scores[key]["pos_wm_scores"].append(bit_matches / 16.0)
+                    attack_scores[key]["neg_wm_scores"].append(cl_bit_matches / 16.0)
 
                 count += 1
 
-        # Summary statistics
+        # Summary statistics & Dual ROC-AUC (Detection & Bit-Matching Extraction)
         summary = {}
         for key, stats in results.items():
             bit_acc = stats["bit_matches"] / max(1, stats["total_bits"])
-            det_acc = stats["det_matches"] / max(1, stats["total_frames"])
+            pos_acc = stats["pos_matches"] / max(1, stats["pos_frames"])
+            neg_acc = stats["neg_matches"] / max(1, stats["neg_frames"])
+            detect_acc = 0.5 * (pos_acc + neg_acc)
+
+            # 1. Detection ROC-AUC & TPR@0.1% FPR
+            pos_d = attack_scores[key]["pos_det_scores"]
+            neg_d = attack_scores[key]["neg_det_scores"]
+            y_det_true = [0] * len(neg_d) + [1] * len(pos_d)
+            y_det_scores = neg_d + pos_d
+            det_auc, det_tpr_001 = compute_auc_and_tpr_at_fpr(y_det_true, y_det_scores, target_fpr=0.001)
+
+            # 2. Watermark Bit-Matching Extraction ROC-AUC & TPR@0.1% FPR
+            pos_w = attack_scores[key]["pos_wm_scores"]
+            neg_w = attack_scores[key]["neg_wm_scores"]
+            y_wm_true = [0] * len(neg_w) + [1] * len(pos_w)
+            y_wm_scores = neg_w + pos_w
+            wm_auc, wm_tpr_001 = compute_auc_and_tpr_at_fpr(y_wm_true, y_wm_scores, target_fpr=0.001)
+
             summary[key] = {
                 "category": stats["category"],
                 "family": stats["family"],
                 "bitrate": stats["bitrate"],
+                "detect_acc": detect_acc,
+                "det_roc_auc": det_auc,
+                "det_tpr_at_001_fpr": det_tpr_001,
                 "bit_acc": bit_acc,
-                "detect_acc": det_acc,
+                "wm_roc_auc": wm_auc,
+                "wm_tpr_at_001_fpr": wm_tpr_001,
+                "tpr": pos_acc,
+                "tnr": neg_acc,
             }
             # TensorBoard logging
             clean_tag = key.lower().replace(" ", "_").replace("(", "").replace(")", "").replace(".", "_").replace("+", "p").replace("%", "pct").replace("-", "_")
             self.writer.add_scalar(f"val/{clean_tag}/bit_acc", bit_acc, global_step=step)
-            self.writer.add_scalar(f"val/{clean_tag}/detect_acc", det_acc, global_step=step)
+            self.writer.add_scalar(f"val/{clean_tag}/detect_acc", detect_acc, global_step=step)
+            self.writer.add_scalar(f"val/{clean_tag}/det_roc_auc", det_auc, global_step=step)
+            self.writer.add_scalar(f"val/{clean_tag}/det_tpr_001", det_tpr_001, global_step=step)
+            self.writer.add_scalar(f"val/{clean_tag}/wm_roc_auc", wm_auc, global_step=step)
+            self.writer.add_scalar(f"val/{clean_tag}/wm_tpr_001", wm_tpr_001, global_step=step)
 
         # Compute average quality metrics (Clean vs Watermarked)
         c_ut = sum(clean_utmos_list) / max(1, len(clean_utmos_list)) if clean_utmos_list else 0.0
@@ -541,12 +598,17 @@ class NeuMarkTrainer:
                 ]
                 z_wm = sum(watermarked_layers)
 
+                # Decode unwatermarked clean latent to waveform as transparent mel reference (no grad)
+                with torch.no_grad():
+                    recon_audio = unwrapped_gen.decoder(z_q)
+
                 # Decode watermarked latent to waveform
                 wm_audio = unwrapped_gen.decoder(z_wm)
 
                 # Align temporal dimensions
-                min_len = min(real_audio.shape[-1], wm_audio.shape[-1])
+                min_len = min(real_audio.shape[-1], wm_audio.shape[-1], recon_audio.shape[-1])
                 real_audio_aligned = real_audio[..., :min_len]
+                recon_audio_aligned = recon_audio[..., :min_len]
                 wm_audio_aligned = wm_audio[..., :min_len]
 
                 # -------------------------------------------------------------
@@ -559,17 +621,17 @@ class NeuMarkTrainer:
                 loss_utmos = (self.utmos_loss(wm_audio, self.sample_rate) * self.utmos_loss_lambda) if self.utmos_loss_lambda > 0 else torch.zeros((), device=self.device)
 
                 # C. Speaker Similarity Loss (WavLM vs Prompt / Clean Speech Reference)
-                ref_prompt = prompt_audio if (prompt_audio.numel() > 0 and prompt_audio.abs().max() > 1e-4) else clean_audio.detach()
+                ref_prompt = prompt_audio if (prompt_audio.numel() > 0 and prompt_audio.abs().max() > 1e-4) else recon_audio_aligned.detach()
                 loss_sim = (self.sim_loss(wm_audio, ref_prompt, self.sample_rate) * self.sim_loss_lambda) if self.sim_loss_lambda > 0 else torch.zeros((), device=self.device)
 
                 # D. ASR Pronunciation Loss (CTC vs Target Text)
                 loss_asr = (self.asr_loss(wm_audio, texts, self.sample_rate) * self.asr_loss_lambda) if self.asr_loss_lambda > 0 else torch.zeros((), device=self.device)
 
-                # Mel Loss (Multi-Scale Spectrogram L1)
+                # Mel Loss (Multi-Scale Spectrogram L1 against unwatermarked clean audio)
                 loss_mel = torch.zeros((), device=self.device)
                 if self.mel_loss_lambda > 0:
                     loss_mel = sum(
-                        mel_k[0] * mel_loss(real_audio_aligned, wm_audio_aligned, **mel_k[1])
+                        mel_k[0] * mel_loss(recon_audio_aligned, wm_audio_aligned, **mel_k[1])
                         for mel_k in zip(self.multi_scale_mel_loss_lambdas, self.multi_scale_mel_loss_kwargs_list)
                     ) * self.mel_loss_lambda
 
@@ -704,6 +766,15 @@ class NeuMarkTrainer:
                     self.detector.train()
                     for d in self.discriminators.values():
                         d.train()
+
+                # Periodic CUDA memory & cuFFT plan cache cleanup
+                if steps > 0 and steps % 200 == 0:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        try:
+                            torch.backends.cuda.cufft_plan_cache.clear()
+                        except Exception:
+                            pass
 
                 self.steps += 1
                 steps = int(self.steps.item())

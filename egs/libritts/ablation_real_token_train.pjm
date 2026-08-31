@@ -1,0 +1,28 @@
+#!/bin/bash
+#PJM -L rscgrp=b-batch
+#PJM -L gpu=1
+#PJM -L elapse=144:00:00
+#PJM -L jobenv=singularity
+#PJM -o logs/ablation_real_token_%j.out
+#PJM -e logs/ablation_real_token_%j.err
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+mkdir -p logs
+
+module load singularity-ce
+
+SIF="/home/pj25001109/${USER}/latest.sif"
+CONFIG_PATH="${1:-${SCRIPT_DIR}/config_ablation_real_tokens.json}"
+
+echo "=========================================================="
+echo " Starting Real-Token Ablation Training on Genkai          "
+echo " Time:       $(date)                                      "
+echo " WorkingDir: ${SCRIPT_DIR}                                "
+echo " Config:     ${CONFIG_PATH}                               "
+echo "=========================================================="
+
+singularity exec --nv --bind "$HOME" "$SIF" bash "${SCRIPT_DIR}/tts_native_train.sh" "${CONFIG_PATH}"

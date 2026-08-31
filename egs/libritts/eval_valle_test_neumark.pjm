@@ -1,0 +1,20 @@
+#!/bin/bash
+#PJM -L rscgrp=b-batch
+#PJM -L gpu=1
+#PJM -L elapse=04:00:00
+#PJM -L jobenv=singularity
+#PJM -o logs/eval_valle_test_neumark_%j.out
+#PJM -e logs/eval_valle_test_neumark_%j.err
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+mkdir -p logs exp/eval_valle_test_neumark_v2
+
+module load singularity-ce
+
+SIF="${SIF:-$HOME/latest.sif}"
+
+singularity exec --nv --bind "$HOME" "$SIF" bash "${SCRIPT_DIR}/eval_valle_test_neumark.sh" "$@"
