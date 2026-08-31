@@ -45,5 +45,6 @@
         1,
         1
     ],
-    "vad_margin": 2.0
+    "vad_margin": 2.0,
+    "resume_checkpoint": "checkpoints/ref_recon.pt"
 }

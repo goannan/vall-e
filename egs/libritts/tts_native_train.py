@@ -266,6 +266,45 @@ class NeuMarkTrainer:
         self.scheduler_generator = CosineAnnealingLR(self.optim_generator, T_max=num_train_steps)
         self.scheduler_discriminator = CosineAnnealingLR(self.optim_discriminators, T_max=num_train_steps)
 
+        # ---------------------------------------------------------
+        # Checkpoint Resuming / Transfer Loading
+        # ---------------------------------------------------------
+        resume_ckpt_path = cfg.get("resume_checkpoint", None)
+        if resume_ckpt_path:
+            p = Path(resume_ckpt_path)
+            if not p.is_absolute():
+                p = SCRIPT_DIR / p
+            if p.exists():
+                print(f"[Init] Loading pretrained checkpoint weights from: {p}", flush=True)
+                ckpt_dict = torch.load(str(p), map_location="cpu", weights_only=False)
+
+                # 1. Load Embedder / MsgProcessor
+                emb_sd = ckpt_dict.get("embedder", ckpt_dict.get("msg_processor", None))
+                if emb_sd is not None:
+                    clean_emb_sd = {k.replace("module.", ""): v for k, v in emb_sd.items()}
+                    self.msg_processor.load_state_dict(clean_emb_sd, strict=False)
+                    print("  -> MsgProcessor (Watermark Embedder) weights loaded.", flush=True)
+
+                # 2. Load Detector
+                det_sd = ckpt_dict.get("detector", None)
+                if det_sd is not None:
+                    clean_det_sd = {k.replace("module.", ""): v for k, v in det_sd.items()}
+                    self.detector.load_state_dict(clean_det_sd, strict=False)
+                    print("  -> Watermark Detector weights loaded.", flush=True)
+
+                # 3. Load Discriminators
+                disc_sd = ckpt_dict.get("discriminators", None)
+                if disc_sd is not None:
+                    for d_name, d_model in self.discriminators.items():
+                        if d_name in disc_sd:
+                            clean_d_sd = {k.replace("module.", ""): v for k, v in disc_sd[d_name].items()}
+                            d_model.load_state_dict(clean_d_sd, strict=False)
+                            print(f"  -> Discriminator '{d_name}' weights loaded.", flush=True)
+
+                print(f"[Init] Successfully initialized base weights from {p.name}.", flush=True)
+            else:
+                print(f"[Warning] Specified resume_checkpoint does not exist: {p}", flush=True)
+
         # Accelerate prepare
         (
             self.msg_processor,
