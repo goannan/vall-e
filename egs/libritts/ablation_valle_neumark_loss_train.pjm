@@ -16,21 +16,13 @@ mkdir -p logs
 module load singularity-ce
 
 SIF="/home/pj25001109/${USER}/latest.sif"
-JOB_ID="${PJM_JOBID:-manual}"
-MONITOR_LOG="logs/monitor_ablation_${JOB_ID}.log"
-
-(
-    while true; do
-        echo "===== $(date) ====="
-        singularity exec --nv --bind "$HOME" "$SIF" nvidia-smi || true
-        ps -u "$USER" -o pid,ppid,pcpu,pmem,etime,cmd --sort=-pcpu | head -30 || true
-        sleep 60
-    done
-) > "$MONITOR_LOG" 2>&1 &
-
-MONITOR_PID=$!
-trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
-
-echo "Monitor log: $MONITOR_LOG"
 CONFIG_PATH="${1:-${SCRIPT_DIR}/config_ablation_valle_neumark_loss.json}"
+
+echo "=========================================================="
+echo " Starting Ablation Training on Genkai                     "
+echo " Time:       $(date)                                      "
+echo " WorkingDir: ${SCRIPT_DIR}                                "
+echo " Config:     ${CONFIG_PATH}                               "
+echo "=========================================================="
+
 singularity exec --nv --bind "$HOME" "$SIF" bash "${SCRIPT_DIR}/tts_native_train.sh" "${CONFIG_PATH}"

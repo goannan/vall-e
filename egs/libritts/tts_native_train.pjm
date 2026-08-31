@@ -16,20 +16,13 @@ mkdir -p logs
 module load singularity-ce
 
 SIF="/home/pj25001109/${USER}/latest.sif"
-JOB_ID="${PJM_JOBID:-manual}"
-MONITOR_LOG="logs/monitor_${JOB_ID}.log"
+CONFIG_PATH="${1:-${SCRIPT_DIR}/config_tts_native.json}"
 
-(
-    while true; do
-        echo "===== $(date) ====="
-        singularity exec --nv --bind "$HOME" "$SIF" nvidia-smi || true
-        ps -u "$USER" -o pid,ppid,pcpu,pmem,etime,cmd --sort=-pcpu | head -30 || true
-        sleep 60
-    done
-) > "$MONITOR_LOG" 2>&1 &
+echo "=========================================================="
+echo " Starting NeuMark Training on Genkai                      "
+echo " Time:       $(date)                                      "
+echo " WorkingDir: ${SCRIPT_DIR}                                "
+echo " Config:     ${CONFIG_PATH}                               "
+echo "=========================================================="
 
-MONITOR_PID=$!
-trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
-
-echo "Monitor log: $MONITOR_LOG"
-singularity exec --nv --bind "$HOME" "$SIF" bash "${SCRIPT_DIR}/tts_native_train.sh" "$@"
+singularity exec --nv --bind "$HOME" "$SIF" bash "${SCRIPT_DIR}/tts_native_train.sh" "${CONFIG_PATH}"
