@@ -118,18 +118,20 @@ class AudioEffects:
 
     @staticmethod
     def lowpass_filter(wav: torch.Tensor, cutoff_freq: float = 5000, sample_rate: int = 16000) -> torch.Tensor:
-        return torchaudio.functional.lowpass_biquad(wav, sample_rate=sample_rate, cutoff_freq=cutoff_freq)
+        return julius.lowpass_filter(wav, cutoff=cutoff_freq / sample_rate, fft=False)
 
     @staticmethod
     def highpass_filter(wav: torch.Tensor, cutoff_freq: float = 500, sample_rate: int = 16000) -> torch.Tensor:
-        return torchaudio.functional.highpass_biquad(wav, sample_rate=sample_rate, cutoff_freq=cutoff_freq)
+        return julius.highpass_filter(wav, cutoff=cutoff_freq / sample_rate, fft=False)
 
     @staticmethod
     def bandpass_filter(wav: torch.Tensor, cutoff_freq_low: float = 300, cutoff_freq_high: float = 8000, sample_rate: int = 16000) -> torch.Tensor:
-        mid = (cutoff_freq_low + cutoff_freq_high) / 2
-        bw = cutoff_freq_high - cutoff_freq_low
-        q = mid / max(1.0, bw)
-        return torchaudio.functional.bandpass_biquad(wav, sample_rate=sample_rate, central_freq=mid, Q=q)
+        return julius.bandpass_filter(
+            wav,
+            cutoff_low=cutoff_freq_low / sample_rate,
+            cutoff_high=cutoff_freq_high / sample_rate,
+            fft=False,
+        )
 
     @staticmethod
     def echo(wav: torch.Tensor, volume: float = 0.3, duration: float = 0.2, sample_rate: int = 16000) -> torch.Tensor:
@@ -142,9 +144,13 @@ class AudioEffects:
 
     @staticmethod
     def smooth(wav: torch.Tensor, window_size: int = 5) -> torch.Tensor:
-        kernel = torch.ones(1, 1, window_size, device=wav.device) / window_size
-        padded = F.pad(wav, (window_size // 2, window_size // 2), mode="reflect")
-        return F.conv1d(padded, kernel)
+        kernel = torch.ones(1, 1, window_size, device=wav.device, dtype=wav.dtype) / window_size
+        pad_len = window_size - 1
+        padded = F.pad(wav, (pad_len, 0))
+        smoothed = F.conv1d(padded, kernel)
+        tmp = torch.zeros_like(wav)
+        tmp[..., :smoothed.shape[-1]] = smoothed[..., :wav.shape[-1]]
+        return tmp
 
     @staticmethod
     def boost_audio(wav: torch.Tensor, amount: float = 10) -> torch.Tensor:
