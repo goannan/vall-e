@@ -335,13 +335,16 @@ def main():
             else:
                 b = item["batch"]
                 codes = b["codes"].to(device)
-                clean_audio = generator.decode(codes)
                 prompt_audio = b["prompt_audio"].to(device)
+                if prompt_audio.ndim == 2:
+                    prompt_audio = prompt_audio.unsqueeze(0)
+                elif prompt_audio.ndim == 1:
+                    prompt_audio = prompt_audio.unsqueeze(0).unsqueeze(0)
+
                 codes_qbt = codes.permute(1, 0, 2).contiguous() if codes.shape[1] == 8 else codes
                 quantized_layers = [generator.quantizer.decode(codes_qbt[k : k + 1], st=k) for k in range(8)]
-
-            audio_dur = clean_audio.shape[-1] / 16000.0
-            total_audio_duration += audio_dur
+                z_clean = sum(quantized_layers)
+                clean_audio = generator.decoder(z_clean)
 
             # 16-bit random message
             message = torch.randint(0, 2, (1, 16), device=device)
@@ -356,23 +359,21 @@ def main():
             total_embed_time += t_embed
 
             # Match lengths
-            if wm_audio.shape[-1] != clean_audio.shape[-1]:
-                if wm_audio.shape[-1] > clean_audio.shape[-1]:
-                    wm_audio = wm_audio[..., :clean_audio.shape[-1]]
-                else:
-                    pad_amt = clean_audio.shape[-1] - wm_audio.shape[-1]
-                    wm_audio = torch.nn.functional.pad(wm_audio, (0, pad_amt))
+            min_len = min(clean_audio.shape[-1], wm_audio.shape[-1])
+            clean_audio = clean_audio[..., :min_len]
+            wm_audio = wm_audio[..., :min_len]
 
-            # Audio Quality Metrics
+            audio_dur = clean_audio.shape[-1] / 16000.0
+            total_audio_duration += audio_dur
+
+            # Audio Quality Metrics (Clean TTS vs. Watermarked TTS)
             try:
-                c_np = clean_audio.squeeze().cpu().numpy()
-                w_np = wm_audio.squeeze().cpu().numpy()
+                c_np = clean_audio.detach().squeeze().cpu().numpy()
+                w_np = wm_audio.detach().squeeze().cpu().numpy()
                 min_l = min(len(c_np), len(w_np))
                 if min_l >= 1600:
-                    c_np = c_np[:min_l]
-                    w_np = w_np[:min_l]
-                    p_val = pesq(16000, c_np, w_np, "wb")
-                    s_val = stoi(c_np, w_np, 16000, extended=False)
+                    p_val = pesq(16000, c_np[:min_l], w_np[:min_l], "wb")
+                    s_val = stoi(c_np[:min_l], w_np[:min_l], 16000, extended=False)
                     pesq_list.append(p_val)
                     stoi_list.append(s_val)
             except Exception:
