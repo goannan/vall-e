@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=eval_audioseal
 #SBATCH --nodes=1
-#SBATCH -w mrcompute02,mrcompute03,compute07
+#SBATCH -w mrcompute03,mrcompute02,compute07
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

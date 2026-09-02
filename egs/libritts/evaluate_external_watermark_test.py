@@ -25,6 +25,8 @@ import numpy as np
 import torch
 import torchaudio
 from tqdm import tqdm
+from pesq import pesq
+from pystoi import stoi
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parents[1]
@@ -364,6 +366,7 @@ def main():
         }
         attack_scores[key] = {"pos_det_scores": [], "neg_det_scores": [], "pos_wm_scores": [], "neg_wm_scores": []}
 
+    clean_pesq_list, clean_stoi_list = [], []
     clean_utmos_list, wm_utmos_list = [], []
     clean_sim_list, wm_sim_list = [], []
     clean_wer_list, wm_wer_list = [], []
@@ -428,7 +431,20 @@ def main():
                 pad_amt = clean_audio.shape[-1] - wm_audio.shape[-1]
                 wm_audio = torch.nn.functional.pad(wm_audio, (0, pad_amt))
 
-        # Audio Quality Metrics
+        # Audio Quality Metrics (PESQ, STOI, UTMOS, SIM, WER)
+        c_np = clean_audio[0, 0].detach().cpu().numpy()
+        w_np = wm_audio[0, 0].detach().cpu().numpy()
+        try:
+            p_val = float(pesq(16000, c_np, w_np, "wb"))
+            clean_pesq_list.append(p_val)
+        except Exception:
+            pass
+        try:
+            s_val = float(stoi(c_np, w_np, 16000, extended=False))
+            clean_stoi_list.append(s_val)
+        except Exception:
+            pass
+
         try:
             c_u = utmos_loss.model(clean_audio.squeeze(1), 16000).mean().item()
             w_u = utmos_loss.model(wm_audio.squeeze(1), 16000).mean().item()
@@ -593,7 +609,12 @@ def main():
     num_attacks = len(val_attacks)
     detect_latency_ms_per_sec = (total_detect_time / max(1e-5, total_audio_duration * num_attacks * 2)) * 1000.0
 
+    mean_pesq = float(np.mean(clean_pesq_list)) if clean_pesq_list else 0.0
+    mean_stoi = float(np.mean(clean_stoi_list)) if clean_stoi_list else 0.0
+
     quality_metrics = {
+        "pesq_wb": mean_pesq,
+        "stoi": mean_stoi,
         "clean_utmos": c_ut, "wm_utmos": w_ut,
         "clean_sim": c_sim, "wm_sim": w_sim,
         "clean_wer": c_wer, "wm_wer": w_wer,

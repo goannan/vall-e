@@ -25,3 +25,5 @@ synthesized_data/
 egs/*/synthesized_data/
 .d*
 *.err
+egs/libritts/audio_samples_comparison/
+*.log

@@ -24,6 +24,8 @@ for mod in ["k2", "k2.version", "kaldialign"]:
 import numpy as np
 import torch
 import torchaudio
+from pesq import pesq
+from pystoi import stoi
 from tqdm import tqdm
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -291,6 +293,7 @@ def main():
         attack_scores[key] = {"pos_det_scores": [], "neg_det_scores": [], "pos_wm_scores": [], "neg_wm_scores": []}
 
     clean_utmos_list, wm_utmos_list = [], []
+    pesq_list, stoi_list = [], []
     clean_sim_list, wm_sim_list = [], []
     clean_wer_list, wm_wer_list = [], []
     clean_cer_list, wm_cer_list = [], []
@@ -362,6 +365,20 @@ def main():
 
             # Audio Quality Metrics
             try:
+                c_np = clean_audio.squeeze().cpu().numpy()
+                w_np = wm_audio.squeeze().cpu().numpy()
+                min_l = min(len(c_np), len(w_np))
+                if min_l >= 1600:
+                    c_np = c_np[:min_l]
+                    w_np = w_np[:min_l]
+                    p_val = pesq(16000, c_np, w_np, "wb")
+                    s_val = stoi(c_np, w_np, 16000, extended=False)
+                    pesq_list.append(p_val)
+                    stoi_list.append(s_val)
+            except Exception:
+                pass
+
+            try:
                 c_u = utmos_loss.model(clean_audio.squeeze(1), 16000).mean().item()
                 w_u = utmos_loss.model(wm_audio.squeeze(1), 16000).mean().item()
                 clean_utmos_list.append(c_u)
@@ -405,7 +422,7 @@ def main():
                 total_detect_time += (time.perf_counter() - t_det_0)
 
                 prob_wm = float(prob_wm_t.mean().item())
-                msg_pred_wm = msg_out_wm.squeeze(0).cpu().numpy().tolist()
+                msg_pred_wm = np.array(msg_out_wm.squeeze().cpu().numpy()).flatten().tolist()[:16]
                 bit_matches = sum(int(c1) == int(c2) for c1, c2 in zip(msg_pred_wm, msg_np))
                 tp_flag = 1 if prob_wm >= 0.5 else 0
 
@@ -420,7 +437,7 @@ def main():
                 total_detect_time += (time.perf_counter() - t_det_1)
 
                 prob_cl = float(prob_cl_t.mean().item())
-                msg_pred_cl = msg_out_cl.squeeze(0).cpu().numpy().tolist()
+                msg_pred_cl = np.array(msg_out_cl.squeeze().cpu().numpy()).flatten().tolist()[:16]
                 cl_bit_matches = sum(int(c1) == int(c2) for c1, c2 in zip(msg_pred_cl, msg_np))
                 clean_tp_flag = 1 if prob_cl >= 0.5 else 0
                 tn_flag = 1 - clean_tp_flag
@@ -442,9 +459,10 @@ def main():
                 c_wav_p = audio_out_dir / f"sample_{i:03d}_{cut_id}_clean_tts.wav"
                 w_wav_p = audio_out_dir / f"sample_{i:03d}_{cut_id}_native_wm.wav"
                 p_wav_p = audio_out_dir / f"sample_{i:03d}_{cut_id}_prompt.wav"
-                torchaudio.save(str(c_wav_p), clean_audio.squeeze(0).cpu(), 16000)
-                torchaudio.save(str(w_wav_p), wm_audio.squeeze(0).cpu(), 16000)
-                torchaudio.save(str(p_wav_p), prompt_audio.squeeze(0).cpu(), 16000)
+                torchaudio.save(str(c_wav_p), clean_audio.reshape(1, -1).cpu(), 16000)
+                torchaudio.save(str(w_wav_p), wm_audio.reshape(1, -1).cpu(), 16000)
+                if prompt_audio is not None and prompt_audio.numel() > 0:
+                    torchaudio.save(str(p_wav_p), prompt_audio.reshape(1, -1).cpu(), 16000)
 
                 sample_audio_records.append({
                     "sample_idx": i,
@@ -535,7 +553,11 @@ def main():
     num_attacks = len(val_attacks)
     detect_latency_ms_per_sec = (total_detect_time / max(1e-5, total_audio_duration * num_attacks * 2)) * 1000.0
 
+    avg_pesq = sum(pesq_list) / max(1, len(pesq_list)) if pesq_list else 0.0
+    avg_stoi = sum(stoi_list) / max(1, len(stoi_list)) if stoi_list else 0.0
     quality_metrics = {
+        "pesq_wb": avg_pesq,
+        "stoi": avg_stoi,
         "clean_utmos": c_ut, "wm_utmos": w_ut,
         "clean_sim": c_sim, "wm_sim": w_sim,
         "clean_wer": c_wer, "wm_wer": w_wer,

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=eval_proposed_native
 #SBATCH --nodes=1
-#SBATCH -w mrcompute02,mrcompute03,compute07
+#SBATCH -w mrcompute03,mrcompute02,compute07
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -19,7 +19,7 @@ eval "$(pyenv virtualenv-init -)"
 pyenv shell voicemark
 
 
-PROPOSED_CKPT=${PROPOSED_CKPT:-/home/wu25/mrnas04home/projects/vall-e/egs/libritts/exp/tts_native_neumark/20260829-003157/NeuMark_step_0030000_epoch_001.pt}
+PROPOSED_CKPT=${PROPOSED_CKPT:-/home/wu25/mrnas04home/projects/vall-e/egs/libritts/exp/tts_native_neumark/20260829-003157/NeuMark_step_0050000_epoch_002.pt}
 
 echo "================================================================================"
 echo " Starting Full Dual-Dataset Benchmark for [PROPOSED TTS-NATIVE WATERMARK] "
@@ -31,7 +31,7 @@ echo "==========================================================================
 # 1. Evaluate on LibriTTS
 echo "[1/2] Running Proposed Model on LibriTTS (test-clean, 2,078 cuts)..."
 python3 test_valle_native_watermark.py \
-    --manifest /home/wu25/mrnas04home/projects/vall-e/egs/libritts/synthesized_data/libriTTS \
+    --manifest data/tokenized_voicemark/cuts_test_valle_native.jsonl.gz \
     --watermark-model "${PROPOSED_CKPT}" \
     --output-dir exp/eval_libri_proposed \
     --num-samples -1 \
@@ -41,7 +41,7 @@ python3 test_valle_native_watermark.py \
 # 2. Evaluate on SeedTTS
 echo "[2/2] Running Proposed Model on SeedTTS (1,088 cuts)..."
 python3 test_valle_native_watermark.py \
-    --manifest /home/wu25/mrnas04home/projects/vall-e/egs/libritts/synthesized_data/seedTTS \
+    --manifest data/tokenized_voicemark/cuts_seedtts_valle_native.jsonl.gz \
     --watermark-model "${PROPOSED_CKPT}" \
     --output-dir exp/eval_seed_proposed \
     --num-samples -1 \

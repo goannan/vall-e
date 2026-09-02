@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=eval_neumark
 #SBATCH --nodes=1
-#SBATCH -w mrcompute02,mrcompute03,compute07
+#SBATCH -w mrcompute03,mrcompute02,compute07
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -28,7 +28,7 @@ echo "==========================================================================
 # 1. Evaluate on LibriTTS
 echo "[1/2] Running NeuMark (ref_recon) on LibriTTS (test-clean, 2,078 cuts)..."
 python3 test_valle_native_watermark.py \
-    --manifest /home/wu25/mrnas04home/projects/vall-e/egs/libritts/synthesized_data/libriTTS \
+    --manifest data/tokenized_voicemark/cuts_test_valle_native.jsonl.gz \
     --watermark-model /home/wu25/mrnas04home/projects/VoiceMark/checkpoints/ref_recon.pt \
     --output-dir exp/eval_libri_neumark \
     --num-samples -1 \
@@ -38,7 +38,7 @@ python3 test_valle_native_watermark.py \
 # 2. Evaluate on SeedTTS
 echo "[2/2] Running NeuMark (ref_recon) on SeedTTS (1,088 cuts)..."
 python3 test_valle_native_watermark.py \
-    --manifest /home/wu25/mrnas04home/projects/vall-e/egs/libritts/synthesized_data/seedTTS \
+    --manifest data/tokenized_voicemark/cuts_seedtts_valle_native.jsonl.gz \
     --watermark-model /home/wu25/mrnas04home/projects/VoiceMark/checkpoints/ref_recon.pt \
     --output-dir exp/eval_seed_neumark \
     --num-samples -1 \

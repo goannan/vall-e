@@ -102,7 +102,30 @@ class TTSNativeDataset(Dataset):
 
         # 4. Prompt audio: resolve speaker reference recording (prompt wav or target speaker audio)
         prompt_audio = None
-        p_id = cut.custom.get("prompt_cut_id", "") if cut.custom else ""
+        if cut.custom and "prompt_wav_rel" in cut.custom:
+            p_rel = cut.custom["prompt_wav_rel"]
+            for p_root in [
+                SCRIPT_DIR / "data/seed_tts_eval/en",
+                SCRIPT_DIR / "data/seed_tts_eval",
+                SCRIPT_DIR / "synthesized_data/seedTTS/prompt",
+                SCRIPT_DIR / "prompts",
+            ]:
+                cand = p_root / p_rel
+                if not cand.exists():
+                    cand = p_root / Path(p_rel).name
+                if cand.exists():
+                    try:
+                        p_wav, p_sr = torchaudio.load(str(cand))
+                        if p_sr != self.sample_rate:
+                            p_wav = torchaudio.functional.resample(p_wav, p_sr, self.sample_rate)
+                        if p_wav.shape[0] > 1:
+                            p_wav = p_wav.mean(dim=0, keepdim=True)
+                        prompt_audio = p_wav
+                        break
+                    except Exception:
+                        pass
+
+        p_id = cut.custom.get("prompt_cut_id", "") if (cut.custom and prompt_audio is None) else ""
         if p_id:
             p_rec_id = p_id.rsplit("-", 1)[0] if "-" in p_id else p_id
             parts = p_rec_id.split("_")
