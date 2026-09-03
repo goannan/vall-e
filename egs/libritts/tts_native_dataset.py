@@ -102,7 +102,20 @@ class TTSNativeDataset(Dataset):
 
         # 4. Prompt audio: resolve speaker reference recording (prompt wav or target speaker audio)
         prompt_audio = None
-        if cut.custom and "prompt_wav_rel" in cut.custom:
+        if cut.custom and "prompt_wav" in cut.custom and cut.custom["prompt_wav"]:
+            cand = Path(cut.custom["prompt_wav"])
+            if cand.exists():
+                try:
+                    p_wav, p_sr = torchaudio.load(str(cand))
+                    if p_sr != self.sample_rate:
+                        p_wav = torchaudio.functional.resample(p_wav, p_sr, self.sample_rate)
+                    if p_wav.shape[0] > 1:
+                        p_wav = p_wav.mean(dim=0, keepdim=True)
+                    prompt_audio = p_wav
+                except Exception:
+                    prompt_audio = None
+
+        if cut.custom and "prompt_wav_rel" in cut.custom and prompt_audio is None:
             p_rel = cut.custom["prompt_wav_rel"]
             for p_root in [
                 SCRIPT_DIR / "data/seed_tts_eval/en",
@@ -137,7 +150,7 @@ class TTSNativeDataset(Dataset):
                     Path(os.environ.get("LIBRITTS_ROOT", "")),
                 ]:
                     if root_candidate.exists():
-                        for subset in ["dev-clean", "train-clean-100", "train-clean-360", "test-clean"]:
+                        for subset in ["dev-clean", "train-clean-100", "train-clean-360", "test-clean", "test-other", "dev-other", "train-other-500"]:
                             cand = root_candidate / subset / spk / chap / f"{p_rec_id}.wav"
                             if cand.exists():
                                 try:

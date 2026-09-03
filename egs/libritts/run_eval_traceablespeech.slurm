@@ -18,36 +18,43 @@ eval "$(pyenv init -)"
 eval "$(pyenv virtualenv-init -)"
 pyenv shell voicemark
 
-VALLE_TS_CKPT="/home/wu25/mrnas04home/projects/vall-e/egs/libritts/valle_checkpoints/valle_traceablespeech_epoch40.pt"
 TS_CKPT="/home/wu25/mrnas04home/projects/vall-e/traceableSpeech/g_00150000"
 TS_CFG="/home/wu25/mrnas04home/projects/vall-e/traceableSpeech/config.json"
-FIXED_PROMPT_WAV="/home/wu25/mrnas04home/projects/vall-e/egs/libritts/prompts/8455_210777_000067_000000.wav"
 
 echo "================================================================================"
-echo " Starting Full Dual-Dataset Benchmark for [TRACEABLESPEECH (VALL-E Native)] "
-echo " VALL-E Checkpoint: ${VALLE_TS_CKPT}"
+echo " Starting Full Triple-Dataset Benchmark for [TRACEABLESPEECH (VALL-E Native)] "
+echo " Datasets: LibriTTS test-clean (2,078), LibriTTS test-other (2,391), Seed-TTS (1,088)"
 echo " TraceableSpeech Vocoder: ${TS_CKPT}"
 echo " Node: $(hostname) | GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'GPU')"
 echo "================================================================================"
 
-# 1. Evaluate on LibriTTS Fixed Prompt Scenario (1,088 pairs from valle_traceablespeech_epoch40.pt)
-echo "[1/2] Running TraceableSpeech on LibriTTS Prompt Pairs (1,088 samples)..."
+# 1. Evaluate on LibriTTS (test-clean, 2,078 cuts)
+echo "[1/3] Running TraceableSpeech on LibriTTS (test-clean, 2,078 cuts)..."
 python3 evaluate_traceablespeech_valle_native.py \
-    --audio-dir infer/traceablespeech_seedtts_fixed_libritts_prompt_epoch40 \
+    --manifest /home/wu25/mrnas04home/projects/vall-e/egs/libritts/synthesized_data/libriTTS \
     --output-dir exp/eval_libri_traceablespeech \
-    --fixed-prompt-wav "${FIXED_PROMPT_WAV}" \
     --ts-checkpoint "${TS_CKPT}" \
     --ts-config "${TS_CFG}" \
     --num-samples -1 \
     --save-audio-samples 20 \
     --device cuda:0
 
-# 2. Evaluate on SeedTTS Dynamic Prompt Scenario (1,081 pairs from valle_traceablespeech_epoch40.pt)
-echo "[2/2] Running TraceableSpeech on SeedTTS Dynamic Prompt Pairs (1,081 samples)..."
+# 2. Evaluate on LibriTTS (test-other, 2,391 cuts)
+echo "[2/3] Running TraceableSpeech on LibriTTS (test-other, 2,391 cuts)..."
 python3 evaluate_traceablespeech_valle_native.py \
-    --audio-dir infer/traceablespeech_seedtts_en_epoch40 \
+    --manifest data/tokenized_voicemark/cuts_test_other_valle_native.jsonl.gz \
+    --output-dir exp/eval_libri_other_traceablespeech \
+    --ts-checkpoint "${TS_CKPT}" \
+    --ts-config "${TS_CFG}" \
+    --num-samples -1 \
+    --save-audio-samples 20 \
+    --device cuda:0
+
+# 3. Evaluate on SeedTTS (1,088 cuts)
+echo "[3/3] Running TraceableSpeech on SeedTTS (1,088 cuts)..."
+python3 evaluate_traceablespeech_valle_native.py \
+    --manifest /home/wu25/mrnas04home/projects/vall-e/egs/libritts/synthesized_data/seedTTS \
     --output-dir exp/eval_seed_traceablespeech \
-    --prompt-dir synthesized_data/seedTTS/prompt \
     --ts-checkpoint "${TS_CKPT}" \
     --ts-config "${TS_CFG}" \
     --num-samples -1 \
@@ -55,5 +62,5 @@ python3 evaluate_traceablespeech_valle_native.py \
     --device cuda:0
 
 echo "================================================================================"
-echo " TraceableSpeech Native VALL-E Benchmark Completed Successfully! "
+echo " TraceableSpeech Native VALL-E Full Triple-Dataset Benchmark Completed! "
 echo "================================================================================"

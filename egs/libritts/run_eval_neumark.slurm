@@ -19,14 +19,14 @@ eval "$(pyenv virtualenv-init -)"
 pyenv shell voicemark
 
 echo "================================================================================"
-echo " Starting Full Dual-Dataset Benchmark for [NEUMARK (VoiceMark ref_recon)] "
-echo " Datasets: LibriTTS (2,078) & Seed-TTS (1,088)"
+echo " Starting Full Triple-Dataset Benchmark for [NEUMARK (VoiceMark ref_recon)] "
+echo " Datasets: LibriTTS test-clean (2,078), LibriTTS test-other (2,391), Seed-TTS (1,088)"
 echo " Checkpoint: /home/wu25/mrnas04home/projects/VoiceMark/checkpoints/ref_recon.pt"
 echo " Node: $(hostname) | GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'GPU')"
 echo "================================================================================"
 
-# 1. Evaluate on LibriTTS
-echo "[1/2] Running NeuMark (ref_recon) on LibriTTS (test-clean, 2,078 cuts)..."
+# 1. Evaluate on LibriTTS (test-clean)
+echo "[1/3] Running NeuMark (ref_recon) on LibriTTS (test-clean, 2,078 cuts)..."
 python3 test_valle_native_watermark.py \
     --manifest data/tokenized_voicemark/cuts_test_valle_native.jsonl.gz \
     --watermark-model /home/wu25/mrnas04home/projects/VoiceMark/checkpoints/ref_recon.pt \
@@ -35,8 +35,18 @@ python3 test_valle_native_watermark.py \
     --save-audio-samples 20 \
     --device cuda:0
 
-# 2. Evaluate on SeedTTS
-echo "[2/2] Running NeuMark (ref_recon) on SeedTTS (1,088 cuts)..."
+# 2. Evaluate on LibriTTS (test-other)
+echo "[2/3] Running NeuMark (ref_recon) on LibriTTS (test-other, 2,391 cuts)..."
+python3 test_valle_native_watermark.py \
+    --manifest data/tokenized_voicemark/cuts_test_other_valle_native.jsonl.gz \
+    --watermark-model /home/wu25/mrnas04home/projects/VoiceMark/checkpoints/ref_recon.pt \
+    --output-dir exp/eval_libri_other_neumark \
+    --num-samples -1 \
+    --save-audio-samples 20 \
+    --device cuda:0
+
+# 3. Evaluate on SeedTTS
+echo "[3/3] Running NeuMark (ref_recon) on SeedTTS (1,088 cuts)..."
 python3 test_valle_native_watermark.py \
     --manifest data/tokenized_voicemark/cuts_seedtts_valle_native.jsonl.gz \
     --watermark-model /home/wu25/mrnas04home/projects/VoiceMark/checkpoints/ref_recon.pt \
@@ -45,4 +55,6 @@ python3 test_valle_native_watermark.py \
     --save-audio-samples 20 \
     --device cuda:0
 
-echo "NeuMark (ref_recon) Full Benchmark Completed Successfully!"
+echo "================================================================================"
+echo " NeuMark (ref_recon) Full Triple-Dataset Benchmark Completed Successfully! "
+echo "================================================================================"

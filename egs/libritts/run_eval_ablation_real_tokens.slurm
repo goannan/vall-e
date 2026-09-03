@@ -21,14 +21,14 @@ pyenv shell voicemark
 CKPT="/home/wu25/mrnas04home/projects/vall-e/egs/libritts/genkai_models/ablation_real_tokens_latest.pt"
 
 echo "================================================================================"
-echo " Starting Full Dual-Dataset Benchmark for [ABLATION REAL TOKENS (step 18000)] "
-echo " Datasets: LibriTTS (2,078) & Seed-TTS (1,088)"
+echo " Starting Full Triple-Dataset Benchmark for [ABLATION REAL TOKENS] "
+echo " Datasets: LibriTTS test-clean (2,078), LibriTTS test-other (2,391), Seed-TTS (1,088)"
 echo " Checkpoint: ${CKPT}"
 echo " Node: $(hostname) | GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'GPU')"
 echo "================================================================================"
 
-# 1. Evaluate on LibriTTS
-echo "[1/2] Running Ablation Real Tokens on LibriTTS (test-clean, 2,078 cuts)..."
+# 1. Evaluate on LibriTTS (test-clean)
+echo "[1/3] Running Ablation Real Tokens on LibriTTS (test-clean, 2,078 cuts)..."
 python3 test_valle_native_watermark.py \
     --manifest data/tokenized_voicemark/cuts_test_valle_native.jsonl.gz \
     --watermark-model "${CKPT}" \
@@ -37,8 +37,18 @@ python3 test_valle_native_watermark.py \
     --save-audio-samples 20 \
     --device cuda:0
 
-# 2. Evaluate on SeedTTS
-echo "[2/2] Running Ablation Real Tokens on SeedTTS (1,088 cuts)..."
+# 2. Evaluate on LibriTTS (test-other)
+echo "[2/3] Running Ablation Real Tokens on LibriTTS (test-other, 2,391 cuts)..."
+python3 test_valle_native_watermark.py \
+    --manifest data/tokenized_voicemark/cuts_test_other_valle_native.jsonl.gz \
+    --watermark-model "${CKPT}" \
+    --output-dir exp/eval_libri_other_ablation_real_tokens \
+    --num-samples -1 \
+    --save-audio-samples 20 \
+    --device cuda:0
+
+# 3. Evaluate on SeedTTS
+echo "[3/3] Running Ablation Real Tokens on SeedTTS (1,088 cuts)..."
 python3 test_valle_native_watermark.py \
     --manifest data/tokenized_voicemark/cuts_seedtts_valle_native.jsonl.gz \
     --watermark-model "${CKPT}" \
@@ -47,4 +57,6 @@ python3 test_valle_native_watermark.py \
     --save-audio-samples 20 \
     --device cuda:0
 
-echo "Ablation Real Tokens (step 18000) Full Benchmark Completed Successfully!"
+echo "================================================================================"
+echo " Ablation Real Tokens Full Triple-Dataset Benchmark Completed Successfully! "
+echo "================================================================================"

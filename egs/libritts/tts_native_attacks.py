@@ -554,13 +554,13 @@ def format_full_validation_table(step: int, results: Dict[str, Dict[str, float]]
         lines.append("-" * 125)
 
         # PESQ
-        if "pesq_wb" in quality_metrics:
-            p_val = quality_metrics["pesq_wb"]
+        p_val = quality_metrics.get("pesq_wb", quality_metrics.get("pesq", None))
+        if p_val is not None:
             lines.append(f"{'PESQ (WB 16kHz)':<28} | {'N/A (Ref)':<12} | {p_val:<12.4f} | {'-':<18}")
 
         # STOI
-        if "stoi" in quality_metrics:
-            s_val = quality_metrics["stoi"]
+        s_val = quality_metrics.get("stoi", quality_metrics.get("stoi_val", None))
+        if s_val is not None:
             lines.append(f"{'STOI (Intelligibility)':<28} | {'1.0000':<12} | {s_val:<12.4f} | {s_val - 1.0:+12.4f}")
 
         # UTMOS

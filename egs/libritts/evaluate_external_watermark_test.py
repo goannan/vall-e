@@ -314,8 +314,8 @@ def main():
         logging.info(f"[1/3] Dataset Mode: Pre-synthesized audio dataset ({len(items)} items)")
     else:
         # Load tokenized cuts manifest
-        from lhotse import CutSet
-        cuts = CutSet.from_file(str(manifest_p))
+        from lhotse import load_manifest_lazy
+        cuts = load_manifest_lazy(str(manifest_p))
         for cut in cuts:
             items.append({
                 "cut_id": cut.id,
@@ -407,8 +407,22 @@ def main():
             c_wav = torch.from_numpy(audio_arr).float()
             if c_wav.ndim == 1:
                 c_wav = c_wav.unsqueeze(0)
+            if cut.sampling_rate != 16000:
+                c_wav = torchaudio.functional.resample(c_wav, cut.sampling_rate, 16000)
+            if c_wav.shape[0] > 1:
+                c_wav = c_wav.mean(dim=0, keepdim=True)
             clean_audio = c_wav.unsqueeze(0).to(device)
-            prompt_audio = clean_audio
+
+            prompt_audio = None
+            if hasattr(cut, "custom") and cut.custom and "prompt_wav" in cut.custom and os.path.exists(cut.custom["prompt_wav"]):
+                p_wav, p_sr = torchaudio.load(str(cut.custom["prompt_wav"]))
+                if p_sr != 16000:
+                    p_wav = torchaudio.functional.resample(p_wav, p_sr, 16000)
+                if p_wav.shape[0] > 1:
+                    p_wav = p_wav.mean(dim=0, keepdim=True)
+                prompt_audio = p_wav.unsqueeze(0).to(device)
+            if prompt_audio is None:
+                prompt_audio = clean_audio
 
         audio_dur = clean_audio.shape[-1] / 16000.0
         total_audio_duration += audio_dur
@@ -434,16 +448,18 @@ def main():
         # Audio Quality Metrics (PESQ, STOI, UTMOS, SIM, WER)
         c_np = clean_audio[0, 0].detach().cpu().numpy()
         w_np = wm_audio[0, 0].detach().cpu().numpy()
-        try:
-            p_val = float(pesq(16000, c_np, w_np, "wb"))
-            clean_pesq_list.append(p_val)
-        except Exception:
-            pass
-        try:
-            s_val = float(stoi(c_np, w_np, 16000, extended=False))
-            clean_stoi_list.append(s_val)
-        except Exception:
-            pass
+        min_l = min(len(c_np), len(w_np))
+        if min_l >= 1600:
+            try:
+                p_val = float(pesq(16000, c_np[:min_l], w_np[:min_l], "wb"))
+                clean_pesq_list.append(p_val)
+            except Exception:
+                pass
+            try:
+                s_val = float(stoi(c_np[:min_l], w_np[:min_l], 16000, extended=False))
+                clean_stoi_list.append(s_val)
+            except Exception:
+                pass
 
         try:
             c_u = utmos_loss.model(clean_audio.squeeze(1), 16000).mean().item()
