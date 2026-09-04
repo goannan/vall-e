@@ -173,10 +173,15 @@ def main():
         from lhotse import load_manifest_lazy
         cuts = load_manifest_lazy(str(manifest_p))
         for cut in cuts:
+            ref_text = ""
+            if cut.supervisions:
+                ref_text = cut.supervisions[0].text
+            elif hasattr(cut, "custom") and cut.custom and "target_text" in cut.custom:
+                ref_text = cut.custom["target_text"]
             pairs.append({
                 "stem": cut.id,
                 "cut": cut,
-                "text": cut.supervisions[0].text if cut.supervisions else "",
+                "text": ref_text,
                 "clean_path": None,
                 "wm_path": None,
                 "prompt_path": None,
@@ -352,24 +357,48 @@ def main():
 
             if item.get("cut") is not None:
                 cut = item["cut"]
-                audio_arr = cut.load_audio()
-                c_wav = torch.from_numpy(audio_arr).float()
-                if c_wav.ndim == 1:
-                    c_wav = c_wav.unsqueeze(0)
-                if cut.sampling_rate != 16000:
-                    c_wav = torchaudio.functional.resample(c_wav, cut.sampling_rate, 16000)
-                if c_wav.shape[0] > 1:
-                    c_wav = c_wav.mean(dim=0, keepdim=True)
-                clean_audio = c_wav.unsqueeze(0).to(device)
-
-                # TraceableSpeech On-The-Fly Embedding
                 wm_sign = item.get("watermark_sign", [5, 1, 12, 10])
                 sign_tensor = torch.tensor([wm_sign], device=device, dtype=torch.long)
-                t0 = time.perf_counter()
-                frames = tokenizer.encode(clean_audio)
-                wm_audio = tokenizer.decode(frames, watermark_sign=sign_tensor)
-                t_embed = time.perf_counter() - t0
-                total_embed_time += t_embed
+
+                if hasattr(cut, "has_features") and cut.has_features:
+                    # Token-level input directly from VALL-E synthesis
+                    feats = cut.load_features()  # numpy (T, 8) or (8, T)
+                    codes = torch.from_numpy(feats).long().to(device)
+                    if codes.ndim == 2 and codes.shape[1] == 8:
+                        codes = codes.transpose(1, 0).unsqueeze(0)  # [1, 8, T]
+                    elif codes.ndim == 2 and codes.shape[0] == 8:
+                        codes = codes.unsqueeze(0)  # [1, 8, T]
+
+                    t0 = time.perf_counter()
+                    clean_audio, wm_audio = tokenizer.decode_pair([(codes, None)], watermark_sign=sign_tensor)
+                    t_embed = time.perf_counter() - t0
+                    total_embed_time += t_embed
+
+                    if clean_audio.shape[1] > 1:
+                        clean_audio = clean_audio.mean(dim=1, keepdim=True)
+                    if wm_audio.shape[1] > 1:
+                        wm_audio = wm_audio.mean(dim=1, keepdim=True)
+
+                    ts_sr = getattr(tokenizer, "sample_rate", 24000)
+                    if ts_sr != 16000:
+                        clean_audio = torchaudio.functional.resample(clean_audio, ts_sr, 16000)
+                        wm_audio = torchaudio.functional.resample(wm_audio, ts_sr, 16000)
+                else:
+                    audio_arr = cut.load_audio()
+                    c_wav = torch.from_numpy(audio_arr).float()
+                    if c_wav.ndim == 1:
+                        c_wav = c_wav.unsqueeze(0)
+                    if cut.sampling_rate != 16000:
+                        c_wav = torchaudio.functional.resample(c_wav, cut.sampling_rate, 16000)
+                    if c_wav.shape[0] > 1:
+                        c_wav = c_wav.mean(dim=0, keepdim=True)
+                    clean_audio = c_wav.unsqueeze(0).to(device)
+
+                    t0 = time.perf_counter()
+                    frames = tokenizer.encode(clean_audio)
+                    wm_audio = tokenizer.decode(frames, watermark_sign=sign_tensor)
+                    t_embed = time.perf_counter() - t0
+                    total_embed_time += t_embed
 
                 min_len = min(clean_audio.shape[-1], wm_audio.shape[-1])
                 clean_audio = clean_audio[..., :min_len]
@@ -377,13 +406,37 @@ def main():
 
                 # Prompt Audio
                 prompt_audio = None
-                if hasattr(cut, "custom") and cut.custom and "prompt_wav" in cut.custom and os.path.exists(cut.custom["prompt_wav"]):
-                    p_wav, p_sr = torchaudio.load(str(cut.custom["prompt_wav"]))
-                    if p_sr != 16000:
-                        p_wav = torchaudio.functional.resample(p_wav, p_sr, 16000)
-                    if p_wav.shape[0] > 1:
-                        p_wav = p_wav.mean(dim=0, keepdim=True)
-                    prompt_audio = p_wav.unsqueeze(0).to(device)
+                if hasattr(cut, "custom") and cut.custom:
+                    cand_p = cut.custom.get("prompt_wav")
+                    if cand_p and os.path.exists(cand_p):
+                        p_wav, p_sr = torchaudio.load(str(cand_p))
+                        if p_sr != 16000:
+                            p_wav = torchaudio.functional.resample(p_wav, p_sr, 16000)
+                        if p_wav.shape[0] > 1:
+                            p_wav = p_wav.mean(dim=0, keepdim=True)
+                        prompt_audio = p_wav.unsqueeze(0).to(device)
+                    elif "prompt_cut_id" in cut.custom:
+                        p_id = cut.custom["prompt_cut_id"]
+                        p_rec_id = p_id.rsplit("-", 1)[0] if "-" in p_id else p_id
+                        parts = p_rec_id.split("_")
+                        if len(parts) >= 4:
+                            spk, chap = parts[0], parts[1]
+                            for r_cand in [
+                                SCRIPT_DIR / "download/LibriTTS",
+                                SCRIPT_DIR.parent.parent / "download/LibriTTS",
+                            ]:
+                                for subset in ["dev-clean", "train-clean-100", "train-clean-360", "test-clean", "test-other"]:
+                                    c_file = r_cand / subset / spk / chap / f"{p_rec_id}.wav"
+                                    if c_file.exists():
+                                        p_wav, p_sr = torchaudio.load(str(c_file))
+                                        if p_sr != 16000:
+                                            p_wav = torchaudio.functional.resample(p_wav, p_sr, 16000)
+                                        if p_wav.shape[0] > 1:
+                                            p_wav = p_wav.mean(dim=0, keepdim=True)
+                                        prompt_audio = p_wav.unsqueeze(0).to(device)
+                                        break
+                                if prompt_audio is not None:
+                                    break
                 if prompt_audio is None:
                     prompt_audio = clean_audio
             else:

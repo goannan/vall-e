@@ -715,14 +715,14 @@ class NeuMarkTrainer:
                 loss_cos = latent_cosine_loss(z_wm, z_q) * self.cos_loss_lambda
 
                 # B. UTMOS Naturalness Loss (Absolute MOS Maximization)
-                loss_utmos = (self.utmos_loss(wm_audio, self.sample_rate) * self.utmos_loss_lambda) if self.utmos_loss_lambda > 0 else torch.zeros((), device=self.device)
+                # loss_utmos = (self.utmos_loss(wm_audio, self.sample_rate) * self.utmos_loss_lambda) if self.utmos_loss_lambda > 0 else torch.zeros((), device=self.device)
 
                 # C. Speaker Similarity Loss (WavLM vs Prompt / Clean Speech Reference)
-                ref_prompt = prompt_audio if (prompt_audio.numel() > 0 and prompt_audio.abs().max() > 1e-4) else recon_audio_aligned.detach()
-                loss_sim = (self.sim_loss(wm_audio, ref_prompt, self.sample_rate) * self.sim_loss_lambda) if self.sim_loss_lambda > 0 else torch.zeros((), device=self.device)
+                # ref_prompt = prompt_audio if (prompt_audio.numel() > 0 and prompt_audio.abs().max() > 1e-4) else recon_audio_aligned.detach()
+                # loss_sim = (self.sim_loss(wm_audio, ref_prompt, self.sample_rate) * self.sim_loss_lambda) if self.sim_loss_lambda > 0 else torch.zeros((), device=self.device)
 
                 # D. ASR Pronunciation Loss (CTC vs Target Text)
-                loss_asr = (self.asr_loss(wm_audio, texts, self.sample_rate) * self.asr_loss_lambda) if self.asr_loss_lambda > 0 else torch.zeros((), device=self.device)
+                # loss_asr = (self.asr_loss(wm_audio, texts, self.sample_rate) * self.asr_loss_lambda) if self.asr_loss_lambda > 0 else torch.zeros((), device=self.device)
 
                 # Mel Loss (Multi-Scale Spectrogram L1 against unwatermarked clean audio)
                 loss_mel = torch.zeros((), device=self.device)
@@ -799,9 +799,9 @@ class NeuMarkTrainer:
                     + loss_cos
                     + loss_adv
                     + loss_mel
-                    + loss_utmos
-                    + loss_sim
-                    + loss_asr
+                    # + loss_utmos
+                    # + loss_sim
+                    # + loss_asr
                 )
 
                 # Normalize loss for gradient accumulation
@@ -850,9 +850,9 @@ class NeuMarkTrainer:
                         "train/vad_pos": loss_vad_pos.item(),
                         "train/vad_neg": loss_vad_neg.item(),
                         "train/cos_loss": loss_cos.item(),
-                        "train/utmos_loss": loss_utmos.item(),
-                        "train/sim_loss": loss_sim.item(),
-                        "train/asr_loss": loss_asr.item(),
+                        # "train/utmos_loss": loss_utmos.item(),
+                        # "train/sim_loss": loss_sim.item(),
+                        # "train/asr_loss": loss_asr.item(),
                         "train/adv_loss": loss_adv.item(),
                         "train/fm_loss": loss_fm.item(),
                         "train/d_loss": loss_D.item(),

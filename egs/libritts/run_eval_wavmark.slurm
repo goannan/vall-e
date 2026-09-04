@@ -35,14 +35,14 @@ python3 evaluate_external_watermark_test.py \
     --device cuda:0
 
 # 2. Evaluate on LibriTTS (test-other)
-echo "[2/3] Running WavMark on LibriTTS (test-other, 2,391 cuts)..."
-python3 evaluate_external_watermark_test.py \
-    --backend wavmark \
-    --manifest data/tokenized_voicemark/cuts_test_other_valle_native.jsonl.gz \
-    --output-dir exp/eval_libri_other_wavmark \
-    --num-samples -1 \
-    --save-audio-samples 20 \
-    --device cuda:0
+# echo "[2/3] Running WavMark on LibriTTS (test-other, 2,391 cuts)..."
+# python3 evaluate_external_watermark_test.py \
+#     --backend wavmark \
+#     --manifest data/tokenized_voicemark/cuts_test_other_valle_native.jsonl.gz \
+#     --output-dir exp/eval_libri_other_wavmark \
+#     --num-samples -1 \
+#     --save-audio-samples 20 \
+#     --device cuda:0
 
 # 3. Evaluate on SeedTTS
 echo "[3/3] Running WavMark on SeedTTS (1,088 cuts)..."

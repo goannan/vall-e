@@ -31,7 +31,7 @@ echo "==========================================================================
 # 1. Evaluate on LibriTTS (test-clean, 2,078 cuts)
 echo "[1/3] Running TraceableSpeech on LibriTTS (test-clean, 2,078 cuts)..."
 python3 evaluate_traceablespeech_valle_native.py \
-    --manifest /home/wu25/mrnas04home/projects/vall-e/egs/libritts/synthesized_data/libriTTS \
+    --manifest data/tokenized_voicemark/cuts_test_valle_native.jsonl.gz \
     --output-dir exp/eval_libri_traceablespeech \
     --ts-checkpoint "${TS_CKPT}" \
     --ts-config "${TS_CFG}" \
@@ -40,20 +40,20 @@ python3 evaluate_traceablespeech_valle_native.py \
     --device cuda:0
 
 # 2. Evaluate on LibriTTS (test-other, 2,391 cuts)
-echo "[2/3] Running TraceableSpeech on LibriTTS (test-other, 2,391 cuts)..."
-python3 evaluate_traceablespeech_valle_native.py \
-    --manifest data/tokenized_voicemark/cuts_test_other_valle_native.jsonl.gz \
-    --output-dir exp/eval_libri_other_traceablespeech \
-    --ts-checkpoint "${TS_CKPT}" \
-    --ts-config "${TS_CFG}" \
-    --num-samples -1 \
-    --save-audio-samples 20 \
-    --device cuda:0
+# echo "[2/3] Running TraceableSpeech on LibriTTS (test-other, 2,391 cuts)..."
+# python3 evaluate_traceablespeech_valle_native.py \
+#     --manifest data/tokenized_voicemark/cuts_test_other_valle_native.jsonl.gz \
+#     --output-dir exp/eval_libri_other_traceablespeech \
+#     --ts-checkpoint "${TS_CKPT}" \
+#     --ts-config "${TS_CFG}" \
+#     --num-samples -1 \
+#     --save-audio-samples 20 \
+#     --device cuda:0
 
 # 3. Evaluate on SeedTTS (1,088 cuts)
 echo "[3/3] Running TraceableSpeech on SeedTTS (1,088 cuts)..."
 python3 evaluate_traceablespeech_valle_native.py \
-    --manifest /home/wu25/mrnas04home/projects/vall-e/egs/libritts/synthesized_data/seedTTS \
+    --manifest data/tokenized_voicemark/cuts_seedtts_valle_native.jsonl.gz \
     --output-dir exp/eval_seed_traceablespeech \
     --ts-checkpoint "${TS_CKPT}" \
     --ts-config "${TS_CFG}" \

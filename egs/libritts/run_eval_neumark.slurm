@@ -26,14 +26,14 @@ echo " Node: $(hostname) | GPU: $(nvidia-smi --query-gpu=name --format=csv,nohea
 echo "================================================================================"
 
 # 1. Evaluate on LibriTTS (test-clean)
-echo "[1/3] Running NeuMark (ref_recon) on LibriTTS (test-clean, 2,078 cuts)..."
-python3 test_valle_native_watermark.py \
-    --manifest data/tokenized_voicemark/cuts_test_valle_native.jsonl.gz \
-    --watermark-model /home/wu25/mrnas04home/projects/VoiceMark/checkpoints/ref_recon.pt \
-    --output-dir exp/eval_libri_neumark \
-    --num-samples -1 \
-    --save-audio-samples 20 \
-    --device cuda:0
+# echo "[1/3] Running NeuMark (ref_recon) on LibriTTS (test-clean, 2,078 cuts)..."
+# python3 test_valle_native_watermark.py \
+#     --manifest data/tokenized_voicemark/cuts_test_valle_native.jsonl.gz \
+#     --watermark-model /home/wu25/mrnas04home/projects/VoiceMark/checkpoints/ref_recon.pt \
+#     --output-dir exp/eval_libri_neumark \
+#     --num-samples -1 \
+#     --save-audio-samples 20 \
+#     --device cuda:0
 
 # 2. Evaluate on LibriTTS (test-other)
 echo "[2/3] Running NeuMark (ref_recon) on LibriTTS (test-other, 2,391 cuts)..."
@@ -46,14 +46,14 @@ python3 test_valle_native_watermark.py \
     --device cuda:0
 
 # 3. Evaluate on SeedTTS
-echo "[3/3] Running NeuMark (ref_recon) on SeedTTS (1,088 cuts)..."
-python3 test_valle_native_watermark.py \
-    --manifest data/tokenized_voicemark/cuts_seedtts_valle_native.jsonl.gz \
-    --watermark-model /home/wu25/mrnas04home/projects/VoiceMark/checkpoints/ref_recon.pt \
-    --output-dir exp/eval_seed_neumark \
-    --num-samples -1 \
-    --save-audio-samples 20 \
-    --device cuda:0
+# echo "[3/3] Running NeuMark (ref_recon) on SeedTTS (1,088 cuts)..."
+# python3 test_valle_native_watermark.py \
+#     --manifest data/tokenized_voicemark/cuts_seedtts_valle_native.jsonl.gz \
+#     --watermark-model /home/wu25/mrnas04home/projects/VoiceMark/checkpoints/ref_recon.pt \
+#     --output-dir exp/eval_seed_neumark \
+#     --num-samples -1 \
+#     --save-audio-samples 20 \
+#     --device cuda:0
 
 echo "================================================================================"
 echo " NeuMark (ref_recon) Full Triple-Dataset Benchmark Completed Successfully! "

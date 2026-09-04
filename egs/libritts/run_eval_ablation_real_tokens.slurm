@@ -38,14 +38,14 @@ python3 test_valle_native_watermark.py \
     --device cuda:0
 
 # 2. Evaluate on LibriTTS (test-other)
-echo "[2/3] Running Ablation Real Tokens on LibriTTS (test-other, 2,391 cuts)..."
-python3 test_valle_native_watermark.py \
-    --manifest data/tokenized_voicemark/cuts_test_other_valle_native.jsonl.gz \
-    --watermark-model "${CKPT}" \
-    --output-dir exp/eval_libri_other_ablation_real_tokens \
-    --num-samples -1 \
-    --save-audio-samples 20 \
-    --device cuda:0
+# echo "[2/3] Running Ablation Real Tokens on LibriTTS (test-other, 2,391 cuts)..."
+# python3 test_valle_native_watermark.py \
+#     --manifest data/tokenized_voicemark/cuts_test_other_valle_native.jsonl.gz \
+#     --watermark-model "${CKPT}" \
+#     --output-dir exp/eval_libri_other_ablation_real_tokens \
+#     --num-samples -1 \
+#     --save-audio-samples 20 \
+#     --device cuda:0
 
 # 3. Evaluate on SeedTTS
 echo "[3/3] Running Ablation Real Tokens on SeedTTS (1,088 cuts)..."
